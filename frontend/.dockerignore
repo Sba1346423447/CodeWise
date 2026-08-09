@@ -1,0 +1,11 @@
+# ===== 防止冗余/冲突文件进入镜像 =====
+
+# 依赖与构建产物（多阶段构建内自行 npm install + build）
+node_modules/
+dist/
+
+# Vite 缓存
+.vite/
+
+# 本地环境文件
+*.local

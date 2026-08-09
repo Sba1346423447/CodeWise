@@ -1,0 +1,50 @@
+# CodeWise 工具定义：集中声明工具的名称、描述与参数 schema（兼容 OpenAI Function Calling）
+
+tools:
+  - name: code_executor
+    description: 在隔离沙箱中执行 Python 代码，返回 stdout、stderr 与退出码，用于验证代码可运行性。
+    parameters:
+      type: object
+      properties:
+        code:
+          type: string
+          description: 待执行的完整 Python 代码
+      required:
+        - code
+
+  - name: test_runner
+    description: 对给定的 Python 代码运行 pytest 测试，返回通过/失败/错误的详细结果。
+    parameters:
+      type: object
+      properties:
+        code:
+          type: string
+          description: 被测的 Python 代码
+        test_code:
+          type: string
+          description: pytest 测试代码
+      required:
+        - code
+        - test_code
+
+  - name: linter
+    description: 对 Python 代码执行静态风格检查，返回代码质量问题列表（行号、规则、修改建议）。
+    parameters:
+      type: object
+      properties:
+        code:
+          type: string
+          description: 待检查的 Python 代码
+      required:
+        - code
+
+  - name: web_search
+    description: 搜索 Python 官方文档与 API 参考，返回相关代码片段，辅助解决实现问题。
+    parameters:
+      type: object
+      properties:
+        query:
+          type: string
+          description: 搜索关键词或问题描述
+      required:
+        - query

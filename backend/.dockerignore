@@ -1,0 +1,17 @@
+# ===== 防止敏感/冗余文件进入镜像 =====
+
+# 本地密钥：Docker 环境变量由 compose 注入，禁止复制进镜像
+.env
+
+# Python 字节码缓存
+__pycache__/
+*.py[cod]
+
+# 运行时产物
+logs/
+*.db
+*.sqlite
+.pytest_cache/
+
+# 测试与本地工具
+tests/

@@ -1,0 +1,46 @@
+# ===== 环境变量与密钥（严禁提交） =====
+.env
+backend/.env
+config/settings.yaml
+*.key
+*.pem
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ===== Node / 前端 =====
+node_modules/
+dist/
+.vite/
+*.local
+
+# ===== 运行时产物 =====
+*.db
+*.sqlite
+logs/
+data/
+backend/logs/
+
+# ===== IDE / 编辑器 =====
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ===== 操作系统 =====
+.DS_Store
+Thumbs.db
+
+# ===== CodeBuddy 工具数据（不上传） =====
+.codebuddy/
+
+# ===== 内部文档（不上传） =====
+AGENTS.md
+code.md

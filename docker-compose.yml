@@ -1,0 +1,59 @@
+# CodeWise 四服务编排：nginx（网关）+ frontend（静态） + backend（API）+ chromadb（向量库）
+services:
+  # ===== 后端：FastAPI + LangGraph =====
+  backend:
+    build: ./backend
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL}
+      LLM_MODEL: ${LLM_MODEL}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # 连接 compose 内的独立 ChromaDB 服务（容器服务名）
+      CHROMA_HOST: chromadb
+      CHROMA_PORT: 8000
+      # SQLite 指向卷挂载目录（卷挂目录而非文件，避免首建目录导致打开失败）
+      DATABASE_URL: sqlite+aiosqlite:////app/data/codewise.db
+    volumes:
+      # 根目录 config/ 挂载到容器根 /config：代码以 parents[3/4] 解析到容器根 /config，
+      # 若不挂载则 prompts.yaml/settings.yaml 全部丢失（提示词模板、反思轮次等配置）
+      - ./config:/config:ro
+      # SQLite 数据库持久化（挂载目录，宿主机重启不丢）
+      - sqlite-data:/app/data
+    depends_on:
+      - chromadb
+    restart: unless-stopped
+
+  # ===== 前端：Vite 构建产物（内部 nginx 提供静态文件） =====
+  frontend:
+    build: ./frontend
+    # 构建产物输出到共享卷，供网关 nginx 挂载
+    volumes:
+      - frontend-dist:/usr/share/nginx/html
+    restart: unless-stopped
+
+  # ===== 向量库：ChromaDB 独立服务 =====
+  chromadb:
+    image: chromadb/chroma:latest
+    ports:
+      - "${CHROMA_PORT:-8001}:8000"
+    volumes:
+      - chroma-data:/chroma/chroma
+    restart: unless-stopped
+
+  # ===== 网关：Nginx 对外入口（静态 + /api 反向代理 + SSE） =====
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "${NGINX_PORT:-8080}:80"
+    volumes:
+      - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - frontend-dist:/usr/share/nginx/html:ro
+    depends_on:
+      - backend
+      - frontend
+    restart: unless-stopped
+
+volumes:
+  sqlite-data:      # SQLite 持久化
+  chroma-data:      # ChromaDB 独立服务数据
+  frontend-dist:    # 前端构建产物共享卷
