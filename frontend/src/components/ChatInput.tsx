@@ -8,14 +8,14 @@
 import { useState } from "react";
 
 interface ChatInputProps {
-  /** 发送消息（多轮对话场景下，同会话内可连续调用） */
-  onSend: (content: string) => void;
+  /** 发送消息（多轮对话场景下，同会话内可连续调用）；model 为用户选择的模型名 */
+  onSend: (content: string, model?: string) => void;
   /** Agent 执行中：禁用输入与发送 */
   disabled?: boolean;
 }
 
 /** 可用模型列表（与后端 LLM 配置对齐；实际模型名以 backend/.env 的 LLM_MODEL 为准） */
-const MODELS = ["deepseek-v4-flash", "deepseek-v3", "gpt-4o", "doubao-seed-2-1-turbo"];
+const MODELS = ["deepseek-v4-flash-ga-260731", "deepseek-v3", "gpt-4o", "doubao-seed-2-1-turbo"];
 
 export function ChatInput({ onSend, disabled = false }: ChatInputProps) {
   const [value, setValue] = useState("");
@@ -24,7 +24,7 @@ export function ChatInput({ onSend, disabled = false }: ChatInputProps) {
   const handleSend = () => {
     const content = value.trim();
     if (!content || disabled) return;
-    onSend(content);
+    onSend(content, model);
     setValue("");
   };
 

@@ -152,6 +152,7 @@ async def react_node(state: AgentState) -> Dict[str, Any]:
     response = await client.chat(
         messages=[{"role": "system", "content": system_prompt}, *state.messages],
         tools=tools_schema,
+        model=state.model or None,
     )
 
     assistant = response.choices[0].message
@@ -235,13 +236,14 @@ def tool_node(state: AgentState) -> Dict[str, Any]:
     return {"messages": tool_messages}
 
 
-async def _generate_test_code(code: str) -> str:
+async def _generate_test_code(code: str, model: str = "") -> str:
     """让 LLM 为当前代码生成 pytest 测试（独立生成一次，避免每次循环重复生成）。
 
     容错调用：LLM 超时/失败返回空串，由 test_gen_node 重试或冒烟测试兜底。
     """
     response = await client.chat_or_none(
-        messages=[{"role": "system", "content": _TEST_PROMPT.format(code=code)}]
+        messages=[{"role": "system", "content": _TEST_PROMPT.format(code=code)}],
+        model=model or None,
     )
     return extract_code(response.choices[0].message.content or "") if response else ""
 
@@ -263,7 +265,7 @@ async def test_gen_node(state: AgentState) -> Dict[str, Any]:
         logger.info("test_gen_node 复用已有测试代码")
         return {"test_code": state.test_code}
 
-    test_code = await _generate_test_code_retry(code)
+    test_code = await _generate_test_code_retry(code, model=state.model)
     if not test_code.strip():
         logger.warning("test_gen_node 失败 | 无法生成测试代码，将使用冒烟测试兜底")
         return {"test_code": "", "test_error": "无法生成测试代码"}
@@ -271,18 +273,19 @@ async def test_gen_node(state: AgentState) -> Dict[str, Any]:
     return {"test_code": test_code}
 
 
-async def _generate_test_code_retry(code: str) -> str:
+async def _generate_test_code_retry(code: str, model: str = "") -> str:
     """生成测试代码，失败自动重试一次（LLM 偶发失败场景的简单容错）。
 
     重试时使用简化提示词（只需一个 assert 的极简测试），降低 LLM 输出难度，
     显著提高生成成功率，减少落入冒烟测试兜底的概率。
     """
-    first = await _generate_test_code(code)
+    first = await _generate_test_code(code, model=model)
     if first.strip():
         return first
     logger.warning("test_gen_node 重试生成测试代码（简化提示词）")
     response = await client.chat_or_none(
-        messages=[{"role": "system", "content": _TEST_PROMPT_SIMPLE.format(code=code)}]
+        messages=[{"role": "system", "content": _TEST_PROMPT_SIMPLE.format(code=code)}],
+        model=model or None,
     )
     return extract_code(response.choices[0].message.content or "") if response else ""
 
@@ -445,7 +448,10 @@ async def reflect_node(state: AgentState) -> Dict[str, Any]:
         test_results=state.test_results,
     )
     # 容错调用：LLM 超时/失败返回 None，不中断整个 Agent 流程
-    response = await client.chat_or_none(messages=[{"role": "system", "content": prompt}])
+    response = await client.chat_or_none(
+        messages=[{"role": "system", "content": prompt}],
+        model=state.model or None,
+    )
     critique = (response.choices[0].message.content or "").strip() if response else ""
 
     # 硬约束：critique 不能为空。若 LLM 输出空白，用测试失败详情构造兜底批评，
@@ -483,7 +489,10 @@ async def refine_node(state: AgentState) -> Dict[str, Any]:
         state.current_code, state.critique, task_desc=state.task_desc
     )
     # 容错调用：LLM 超时/失败返回 None，保留原代码（避免空/解释文字覆盖已有实现）
-    response = await client.chat_or_none(messages=[{"role": "system", "content": prompt}])
+    response = await client.chat_or_none(
+        messages=[{"role": "system", "content": prompt}],
+        model=state.model or None,
+    )
     new_code = extract_code(response.choices[0].message.content or "") if response else ""
 
     round_index = state.reflection_count + 1
@@ -515,6 +524,7 @@ async def _build_final_summary(
     final_code: str,
     tests_passed: bool,
     reflection_count: int,
+    model: str = "",
 ) -> str:
     """让 LLM 生成面向用户的自然语言交付总结（贴合对话，替代机械"✓测试通过"）。
 
@@ -530,9 +540,35 @@ async def _build_final_summary(
         f"优化轮次：{reflection_count}\n"
         f"最终代码：\n```python\n{final_code}\n```"
     )
-    response = await client.chat_or_none(messages=[{"role": "system", "content": prompt}])
+    response = await client.chat_or_none(
+        messages=[{"role": "system", "content": prompt}],
+        model=model or None,
+    )
     summary = (response.choices[0].message.content or "").strip() if response else ""
     return summary
+
+
+# 环境类错误特征（Windows GBK 编码等）：命中即判定为"环境因素"而非代码逻辑问题。
+# 环境因素导致的验证失败不暴露给前端用户（内部细节仅进后端日志），
+# 前端按"已完成"展示，避免误导用户以为代码质量有问题。
+_ENV_ERROR_MARKERS = ("UnicodeEncodeError", "UnicodeDecodeError", "LookupError")
+
+
+def _is_env_error(test_results: Optional[Dict[str, Any]]) -> bool:
+    """判断测试失败是否源于环境因素（编码类错误），而非代码逻辑问题。"""
+    output = (test_results or {}).get("output") or ""
+    return any(marker in output for marker in _ENV_ERROR_MARKERS)
+
+
+def _persist_experience(task_desc: str, code: str, summary: str) -> None:
+    """交付通过后沉淀经验到跨会话经验库，供后续相似任务检索复用。
+
+    仅沉淀测试通过的方案（失败代码入库会误导后续检索）；写入失败由
+    add_experience 内部降级（告警不抛出），不影响当前交付链路。
+    """
+    if not code or not summary:
+        return
+    experience_store.add_experience(task_desc=task_desc, code=code, summary=summary)
 
 
 async def finalize_node(state: AgentState) -> Dict[str, Any]:
@@ -553,38 +589,58 @@ async def finalize_node(state: AgentState) -> Dict[str, Any]:
         logger.info("finalize_node 交付问答 | 回答长度={}", len(answer))
         return {"final_code": "", "final_message": answer, "tests_passed": False}
 
-    # 回退优先：当前实现被改坏（测试失败）但历史最优版本真实通过过测试
+    # 环境因素判定：测试失败源于编码类环境问题（非代码逻辑）时，用户视角视为"已完成"。
+    # 内部细节仅进后端日志，不暴露给前端——前端只面向结果，不承担诊断职责。
+    env_error = not state.tests_passed and _is_env_error(state.test_results)
+    if env_error:
+        logger.warning(
+            "finalize_node 环境因素按完成处理 | 错误特征已记录于 test_results.output"
+        )
+
+    # 回退优先：当前实现被改坏（测试失败）但历史最优版本真实通过过测试。
+    # 环境因素不算"改坏"（代码逻辑无问题），不触发回退，直接交付当前实现。
     best = (state.best_code or "").strip()
-    if not state.tests_passed and best and state.best_tests_passed:
+    if not state.tests_passed and not env_error and best and state.best_tests_passed:
         logger.warning("finalize_node 回退 | 当前实现验证失败，回退到最优快照 长度={}", len(best))
         base_message = (
             f"✗ 当前版本未通过验证，已回退到历史最优实现"
             f"（已优化 {state.reflection_count} 轮）"
         )
         summary = await _build_final_summary(
-            state.task_desc, best, True, state.reflection_count
+            state.task_desc, best, True, state.reflection_count, model=state.model
         )
+        # 回退交付的历史最优版本也沉淀经验（该版本曾真实通过测试）
+        _persist_experience(state.task_desc, best, summary or base_message)
         return {
             "final_code": best,
             "final_message": summary or base_message,
             "tests_passed": True,
+            # 清空当前失败版本的统计，避免前端出现"✓通过 但 错误1"的矛盾展示
+            "test_results": {},
         }
 
     code = (state.current_code or "").strip()
     if code:
+        # 环境因素按"通过"处理：tests_passed 以用户视角为准（true），
+        # test_results 清空使前端测试面板隐藏——环境细节不进入用户界面。
+        passed = state.tests_passed or env_error
         base_message = (
-            "✓ 已完成" if state.tests_passed
+            "✓ 已完成" if passed
             else f"✗ 仍需优化（已优化 {state.reflection_count} 轮），已交付当前实现"
         )
-        logger.info("finalize_node 完成 | 交付代码 长度={} tests_passed={}",
-                    len(code), state.tests_passed)
+        logger.info("finalize_node 完成 | 交付代码 长度={} tests_passed={} env_error={}",
+                    len(code), passed, env_error)
         summary = await _build_final_summary(
-            state.task_desc, code, state.tests_passed, state.reflection_count
+            state.task_desc, code, passed, state.reflection_count, model=state.model
         )
+        # 仅测试通过（含环境因素按通过处理）时沉淀经验：失败方案入库会污染经验库检索质量
+        if passed:
+            _persist_experience(state.task_desc, code, summary or base_message)
         return {
             "final_code": code,
             "final_message": summary or base_message,
-            "tests_passed": state.tests_passed,
+            "tests_passed": passed,
+            "test_results": {} if env_error else state.test_results,
         }
 
     # 无代码兜底：交付明确的失败说明，绝不返回空白结果

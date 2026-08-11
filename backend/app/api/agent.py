@@ -46,6 +46,7 @@ class AgentRequest(BaseModel):
 
     task_desc: str
     session_id: Optional[str] = None
+    model: Optional[str] = None  # 前端模型下拉选择；为空时后端使用默认配置
 
 
 def _build_assistant_content(result: dict) -> str:
@@ -117,6 +118,7 @@ async def run_agent(request: AgentRequest) -> StreamingResponse:
                     session_id=session_id,
                     history_messages=history_messages,
                     on_event=on_node,
+                    model=request.model,
                 )
                 await session_model.update_session(
                     session_id,

@@ -46,10 +46,18 @@ class LLMClient:
             )
         return self._client
 
-    def _build_kwargs(self, messages: List[dict], tools: Optional[List[dict]]) -> dict:
-        """组装公共请求参数；tools 为空时不传，避免 OpenAI 拒绝空列表。"""
+    def _build_kwargs(
+        self,
+        messages: List[dict],
+        tools: Optional[List[dict]],
+        model: Optional[str] = None,
+    ) -> dict:
+        """组装公共请求参数；tools 为空时不传，避免 OpenAI 拒绝空列表。
+
+        model 为空时回退到实例默认模型（config.model），支持按请求动态切换模型。
+        """
         kwargs: dict = {
-            "model": self.model,
+            "model": model or self.model,
             "messages": messages,
             "temperature": config.temperature,
             "max_tokens": config.max_tokens,
@@ -62,17 +70,18 @@ class LLMClient:
         self,
         messages: List[dict],
         tools: Optional[List[dict]] = None,
+        model: Optional[str] = None,
     ) -> ChatCompletion:
         """非流式对话：返回完整响应，调用方自行解析 content 或 tool_calls。"""
         start = time.monotonic()
         n_tools = len(tools) if tools else 0
         try:
             response = await self._get_client().chat.completions.create(
-                **self._build_kwargs(messages, tools)
+                **self._build_kwargs(messages, tools, model)
             )
             logger.info(
                 "LLM 非流式调用成功 | 模型={} 工具数={} 消息数={} 耗时={:.2f}s finish_reason={}",
-                config.model,
+                model or self.model,
                 n_tools,
                 len(messages),
                 time.monotonic() - start,
@@ -82,7 +91,7 @@ class LLMClient:
         except Exception as exc:
             logger.error(
                 "LLM 非流式调用失败 | 模型={} 消息数={} 耗时={:.2f}s 错误={}",
-                config.model,
+                model or self.model,
                 len(messages),
                 time.monotonic() - start,
                 exc,
@@ -93,6 +102,7 @@ class LLMClient:
         self,
         messages: List[dict],
         tools: Optional[List[dict]] = None,
+        model: Optional[str] = None,
     ) -> Optional[ChatCompletion]:
         """容错对话：LLM 失败/超时返回 None 而非抛异常，供节点降级处理。
 
@@ -100,7 +110,7 @@ class LLMClient:
         调用方拿到 None 后走各自的兜底逻辑（构造兜底 critique / 保留原代码）。
         """
         try:
-            return await self.chat(messages, tools)
+            return await self.chat(messages, tools, model)
         except LLMClientError:
             logger.warning("LLM 容错调用返回 None（已降级处理）| 消息数={}", len(messages))
             return None
@@ -109,6 +119,7 @@ class LLMClient:
         self,
         messages: List[dict],
         tools: Optional[List[dict]] = None,
+        model: Optional[str] = None,
     ) -> AsyncIterator[dict]:
         """流式对话：逐块产出统一事件，供上层 SSE 推送。
 

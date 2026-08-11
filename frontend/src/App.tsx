@@ -117,10 +117,10 @@ export default function App() {
     sessions.find((s) => s.session_id === activeSessionId)?.task_desc ||
     "";
 
-  /** 发送消息：多轮复用 activeSessionId，新会话传 undefined */
-  const handleSend = async (content: string) => {
+  /** 发送消息：多轮复用 activeSessionId，新会话传 undefined；携带用户选择的模型 */
+  const handleSend = async (content: string, model?: string) => {
     setHistoryDetail(null); // 进入实时，隐藏历史回放
-    await run(content, activeSessionId ?? undefined);
+    await run(content, activeSessionId ?? undefined, model);
     await refresh(); // 会话列表反映新建/更新
   };
 

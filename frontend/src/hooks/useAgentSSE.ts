@@ -162,11 +162,16 @@ export function useAgentSSE() {
       taskDesc: string,
       sessionId: string,
       signal: AbortSignal,
+      model?: string,
     ): Promise<boolean> => {
       const response = await fetch("/api/agent", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ task_desc: taskDesc, session_id: sessionId || undefined }),
+        body: JSON.stringify({
+          task_desc: taskDesc,
+          session_id: sessionId || undefined,
+          model: model || undefined,
+        }),
         signal,
       });
       if (!response.ok || !response.body) {
@@ -291,9 +296,9 @@ export function useAgentSSE() {
     [typeOutText, typeOutCode],
   );
 
-  /** 启动 Agent 任务：支持多轮（传入 sessionId 复用会话） */
+  /** 启动 Agent 任务：支持多轮（传入 sessionId 复用会话）；model 可选（用户选择模型） */
   const run = useCallback(
-    async (taskDesc: string, sessionId?: string) => {
+    async (taskDesc: string, sessionId?: string, model?: string) => {
       if (!taskDesc.trim()) return;
       stopTyping();
       setStatus("running");
@@ -304,7 +309,7 @@ export function useAgentSSE() {
       const controller = new AbortController();
       abortRef.current = controller;
       try {
-        await executeOnce(taskDesc.trim(), sessionIdRef.current, controller.signal);
+        await executeOnce(taskDesc.trim(), sessionIdRef.current, controller.signal, model);
       } catch (err) {
         if (controller.signal.aborted) return; // 用户手动停止
         setError((err as Error).message);

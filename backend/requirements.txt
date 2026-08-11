@@ -1,6 +1,5 @@
 # ===== Agent 编排框架 =====
 langgraph>=1.2.0,<2.0
-langgraph-checkpoint-sqlite>=2.0,<3.0
 
 # ===== LLM 调用 =====
 openai>=2.38.0,<3.0

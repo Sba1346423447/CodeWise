@@ -1,7 +1,6 @@
 # ===== 环境变量与密钥（严禁提交） =====
 .env
 backend/.env
-config/settings.yaml
 *.key
 *.pem
 
@@ -44,3 +43,6 @@ Thumbs.db
 # ===== 内部文档（不上传） =====
 AGENTS.md
 code.md
+
+# ===== AI 工具工作数据（不上传） =====
+.workbuddy/

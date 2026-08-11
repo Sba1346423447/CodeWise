@@ -26,6 +26,8 @@ class AgentState(BaseModel):
 
     # 用户任务描述（图启动时的初始输入）
     task_desc: str = ""
+    # 本次请求选择的模型名（前端模型下拉可选传入；空串表示使用后端默认配置）
+    model: str = ""
     # 消息历史（OpenAI 兼容 dict 格式）：使用自定义 reducer 自动追加；
     # value 类型用 Any 以兼容 tool_calls（List[Dict]）、tool_call_id（str）等多种结构
     messages: Annotated[List[Dict[str, Any]], _append_items] = Field(default_factory=list)

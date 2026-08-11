@@ -58,11 +58,15 @@ class ExperienceStore:
         if self._collection is None:
             logger.warning("经验库未连接，跳过写入")
             return doc_id
-        self._collection.upsert(
-            ids=[doc_id],
-            documents=[task_desc],
-            metadatas=[{"code": code, "summary": summary}],
-        )
+        try:
+            self._collection.upsert(
+                ids=[doc_id],
+                documents=[task_desc],
+                metadatas=[{"code": code, "summary": summary}],
+            )
+        except Exception as exc:
+            # 运行时服务不可达/异常时仅告警降级，不抛出，保证调用方（交付链路）不受影响
+            logger.warning(f"经验写入失败，跳过：{exc}")
         return doc_id
 
     def retrieve_similar(self, task_desc: str, top_k: int = 3) -> List[Dict]:

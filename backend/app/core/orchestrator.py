@@ -8,7 +8,7 @@ import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from ..llm.config import config as llm_config
-from ..memory.conversation import ConversationMemory
+from ..memory.conversation import ConversationMemory, compress_messages
 from ..utils.logger import get_logger
 from .graph.builder import agent_graph
 from .graph.state import AgentState
@@ -56,6 +56,7 @@ class AgentOrchestrator:
         session_id: Optional[str] = None,
         history_messages: Optional[List[Dict[str, Any]]] = None,
         on_event: Optional[EventCallback] = None,
+        model: Optional[str] = None,
     ) -> Dict[str, Any]:
         """异步执行完整 Agent 流程：逐节点推送事件，返回最终交付结果。
 
@@ -65,25 +66,27 @@ class AgentOrchestrator:
           注入后作为上下文基础，实现"同会话内继续追问、代码演进记忆"。
         - on_event：可选异步回调，接收 {"type": "node", "node", "update"} 事件，
           供 API 层转为 SSE 流推送给前端。
+        - model：本次请求选择的模型名（可选）；为空时使用后端默认配置。
         """
         logger.info("Agent 任务开始 | 会话={} 任务={}", session_id, task_desc[:100])
         start = time.monotonic()
 
-        # 反思记忆已随 AgentState 流转（每次图执行新建 state，天然隔离），
-        # 无需全局清理；对话历史由 history_messages 显式注入，实现跨轮记忆。
         # 组装上下文：历史消息 + 本轮用户消息。
-        # 用局部 ConversationMemory 承载并做 max_messages 截断，避免长会话 token 爆炸。
-        conv = ConversationMemory()
+        # 长会话用滚动摘要压缩（compress_messages）替代机械截断，
+        # 保留早期语义（需求演进 / 已定决策），避免多轮对话丢信息。
+        context: List[Dict[str, str]] = []
         for msg in history_messages or []:
             role = msg.get("role")
             content = msg.get("content")
             if role in ("user", "assistant") and content:
-                conv.add(role, content)
-        conv.add("user", task_desc)
+                context.append({"role": role, "content": content})
+        context.append({"role": "user", "content": task_desc})
+        context = await compress_messages(context, model=model)
 
         initial_state = AgentState(
             task_desc=task_desc,
-            messages=conv.get_messages(),
+            messages=context,
+            model=model or "",
         )
 
         # 本轮行动摘要：按节点执行顺序收集，供前端折叠展示（贴近 Claude Code 叙事）
@@ -146,6 +149,11 @@ class AgentOrchestrator:
             return {"type": "tool", "label": "生成验证", "detail": "为当前代码生成验证用例"}
         if node_name == "test_node":
             tr = update.get("test_results") or {}
+            # 环境因素导致的测试失败（编码类错误）不向用户展示统计数字——
+            # 前端只面向结果，环境细节仅进后端日志（见 finalize_node 的 env_error 处理）
+            output = (tr.get("output") or "")
+            if any(marker in output for marker in ("UnicodeEncodeError", "UnicodeDecodeError", "LookupError")):
+                return None
             passed = tr.get("passed", 0)
             failed = tr.get("failed", 0)
             errors = tr.get("errors", 0)
