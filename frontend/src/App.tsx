@@ -9,12 +9,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ErrorBoundary } from "./components/ErrorBoundary";
-import { ChatInput } from "./components/ChatInput";
+import { ChatInput, type ChatInputHandle } from "./components/ChatInput";
 import type { ChatMessageData } from "./components/ChatMessage";
 import { FileTree } from "./components/FileTree";
 import { MessageList } from "./components/MessageList";
 import { SessionHistory } from "./components/SessionHistory";
 import { SettingsPanel } from "./components/SettingsPanel";
+import { WelcomePage } from "./components/WelcomePage";
 import { useAgentSSE } from "./hooks/useAgentSSE";
 import { useSessionHistory } from "./hooks/useSessionHistory";
 import type { SessionInfo } from "./types/agent";
@@ -57,6 +58,8 @@ export default function App() {
   const [theme, setTheme] = useState<"dark" | "light">(initTheme);
   const [activeTab, setActiveTab] = useState<TabId>("chat");
   const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT);
+  // 输入框外部控制句柄：欢迎页快捷任务点击后通过 ref 填入提示词
+  const chatInputRef = useRef<ChatInputHandle>(null);
 
   // 拖拽侧栏：鼠标按下记录起点，移动时更新宽度，抬起结束
   const draggingRef = useRef(false);
@@ -223,6 +226,29 @@ export default function App() {
     if (activeSessionId) await handleSelect(activeSessionId);
   };
 
+  /** 重新生成：找到该助手消息之前最近一条用户消息作为任务描述，复用 run 重发。
+   * 简化实现——把该任务作为新任务重发（多轮上下文依赖 activeSessionId 由后端演进）。 */
+  const handleRegenerate = useCallback(
+    async (messageId: string) => {
+      if (running) return;
+      const idx = displayMessages.findIndex((m) => m.id === messageId);
+      if (idx < 0) return;
+      // 向前回溯到最近一条 user 消息，取其 content 作为任务描述
+      let taskDesc = "";
+      for (let i = idx - 1; i >= 0; i--) {
+        if (displayMessages[i].role === "user") {
+          taskDesc = displayMessages[i].content;
+          break;
+        }
+      }
+      if (!taskDesc.trim()) return;
+      setHistoryDetail(null); // 进入实时，隐藏历史回放
+      await run(taskDesc, activeSessionId ?? undefined);
+      await refresh();
+    },
+    [running, displayMessages, run, activeSessionId, refresh],
+  );
+
   return (
     // 顶层错误边界：任何子树渲染异常（如超长 Markdown 解析溢出）都不会白屏，
     // 而是显示"页面出错了"降级 UI 而非卸载整棵 React 树
@@ -277,6 +303,7 @@ export default function App() {
               activeSessionId={activeSessionId}
               onSelect={handleSelect}
               onDelete={handleDelete}
+              onNewChat={handleNewChat}
               loading={loading}
             />
           )}
@@ -347,21 +374,30 @@ export default function App() {
         </header>
 
         {/* 消息流：main 为 flex-col 容器，MessageList 直接 flex-1 撑满可滚动。
-            细粒度错误边界：单条超长消息渲染异常仅降级该消息区域，不拖垮整个页面 */}
-        <ErrorBoundary
-          fallback={
-            <div className="flex-1 p-6 text-center text-sm text-gray-400">
-              部分消息渲染失败，已被错误边界隔离。可刷新或新建对话继续使用。
-            </div>
-          }
-        >
-          <MessageList messages={displayMessages} typingAssistantId={typingAssistantId} />
-        </ErrorBoundary>
+            细粒度错误边界：单条超长消息渲染异常仅降级该消息区域，不拖垮整个页面。
+            空会话（消息列表为空）渲染欢迎页：欢迎语 + 快捷任务，点击模板填入输入框 */}
+        {displayMessages.length === 0 ? (
+          <WelcomePage onPick={(prompt) => chatInputRef.current?.setValue(prompt)} />
+        ) : (
+          <ErrorBoundary
+            fallback={
+              <div className="flex-1 p-6 text-center text-sm text-gray-400">
+                部分消息渲染失败，已被错误边界隔离。可刷新或新建对话继续使用。
+              </div>
+            }
+          >
+            <MessageList
+              messages={displayMessages}
+              typingAssistantId={typingAssistantId}
+              onRegenerate={handleRegenerate}
+            />
+          </ErrorBoundary>
+        )}
 
         {error && (
           <p className="px-6 pb-1 text-center text-sm text-danger">{error}</p>
         )}
-        <ChatInput onSend={handleSend} disabled={isBusy} />
+        <ChatInput ref={chatInputRef} onSend={handleSend} disabled={isBusy} />
       </main>
     </div>
     </ErrorBoundary>

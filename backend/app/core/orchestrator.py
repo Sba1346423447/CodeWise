@@ -13,6 +13,7 @@ from ..utils.logger import get_logger
 from .graph.builder import agent_graph
 from .graph.state import AgentState
 from .tools.code_executor import CodeExecutor
+from .tools.file_editor import FileEditor
 from .tools.linter import Linter
 from .tools.registry import registry
 from .tools.test_runner import TestRunner
@@ -32,7 +33,7 @@ class AgentOrchestrator:
         self.conversation = ConversationMemory()
 
     def _register_default_tools(self) -> None:
-        """启动时一次性装配四个内置工具（幂等：已注册则跳过）。"""
+        """启动时一次性装配内置工具（幂等：已注册则跳过）。"""
         if not registry.list_names():
             registry.register_many(
                 [
@@ -40,6 +41,7 @@ class AgentOrchestrator:
                     TestRunner(),
                     Linter(),
                     WebSearch(),
+                    FileEditor(),
                 ]
             )
 

@@ -23,3 +23,10 @@ sandbox:
   workdir: ""
   # 代码执行超时时间（秒）
   timeout: 30
+
+# ===== 代码库感知配置（repo-map） =====
+repo_map:
+  # 项目根目录：扫描该目录下的 .py 文件生成结构摘要；留空表示禁用
+  root: ""
+  # 摘要最大字符数：控制注入 token 预算
+  max_chars: 2000

@@ -13,9 +13,15 @@ interface MessageListProps {
   messages: ChatMessageData[];
   /** 正在流式生成的助手消息 id（精确到消息，不依赖全局 running） */
   typingAssistantId?: string | null;
+  /** 重新生成某条助手消息（App 提供实现，复用 run 重发对应任务描述） */
+  onRegenerate?: (messageId: string) => void;
 }
 
-export function MessageList({ messages, typingAssistantId = null }: MessageListProps) {
+export function MessageList({
+  messages,
+  typingAssistantId = null,
+  onRegenerate,
+}: MessageListProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // 消息新增或流式增量更新时，仅在"接近底部"时吸附到底部：
@@ -74,7 +80,11 @@ export function MessageList({ messages, typingAssistantId = null }: MessageListP
               </div>
             }
           >
-            <ChatMessage message={msg} streaming={typingAssistantId === msg.id} />
+            <ChatMessage
+              message={msg}
+              streaming={typingAssistantId === msg.id}
+              onRegenerate={onRegenerate}
+            />
           </ErrorBoundary>
         ))}
       </div>

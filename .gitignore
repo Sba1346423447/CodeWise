@@ -23,6 +23,7 @@ dist/
 # ===== 运行时产物 =====
 *.db
 *.sqlite
+*.log
 logs/
 data/
 backend/logs/

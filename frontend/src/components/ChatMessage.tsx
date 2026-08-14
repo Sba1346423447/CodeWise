@@ -6,7 +6,7 @@
  *   正文按模块分层渲染（结果结论 / 主推方案 / 参考方案 / 用法示例）；
  *   底部为操作栏（复制整条/重新生成/插入文件/分享）+ 元信息（耗时/模型/时间）。
  */
-import { memo, useMemo } from "react";
+import { memo, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import Prism from "prismjs";
 import "prismjs/components/prism-python";
@@ -104,25 +104,26 @@ function CodeBlock({ code }: { code: string }) {
   );
 }
 
-/** AI 消息底部操作栏：复制整条 / 重新生成 / 插入到文件 / 分享 */
+/** AI 消息底部操作栏：复制整条 / 重新生成（分享/插入暂未接线，隐藏或置灰避免空壳） */
 function MessageActions({
   onCopy,
+  copied = false,
   onRegenerate,
-  onInsert,
-  onShare,
 }: {
   onCopy: ActionHandler;
+  /** 复制成功轻提示：短暂显示"已复制" */
+  copied?: boolean;
   onRegenerate?: ActionHandler;
-  onInsert: ActionHandler;
-  onShare: ActionHandler;
 }) {
   const btnCls =
     "flex items-center gap-1 rounded px-1.5 py-1 text-xs text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-300";
+  const disabledBtnCls =
+    "flex cursor-not-allowed items-center gap-1 rounded px-1.5 py-1 text-xs text-gray-300 dark:text-gray-600";
   return (
     <div className="mt-1 flex items-center gap-1">
       <button type="button" onClick={onCopy} className={btnCls} title="复制整条回复">
         <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect width="14" height="14" x="8" y="8" rx="2" /><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" /></svg>
-        复制
+        {copied ? "已复制" : "复制"}
       </button>
       {onRegenerate && (
         <button type="button" onClick={onRegenerate} className={btnCls} title="重新生成">
@@ -130,14 +131,12 @@ function MessageActions({
           重新生成
         </button>
       )}
-      <button type="button" onClick={onInsert} className={btnCls} title="插入到文件">
-        <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M12 5v14" /><path d="m19 12-7 7-7-7" /></svg>
-        插入到文件
-      </button>
-      <button type="button" onClick={onShare} className={btnCls} title="分享">
+      {/* 插入到文件：依赖后端文件编辑能力（阶段 2 再接入），当前隐藏 */}
+      {/* 分享：暂未实现后端分享链路，置灰提示即将支持 */}
+      <span className={disabledBtnCls} title="分享功能即将支持">
         <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="18" cy="5" r="3" /><circle cx="6" cy="12" r="3" /><circle cx="18" cy="19" r="3" /><path d="m8.59 13.51 6.83 3.98" /><path d="m15.41 6.51-6.82 3.98" /></svg>
         分享
-      </button>
+      </span>
     </div>
   );
 }
@@ -160,30 +159,16 @@ function ChatMessageInner({ message, streaming = false, onRegenerate }: ChatMess
   }
 
   // AI 消息：靠左带头像，纯文本不加背景卡片
+  const [copied, setCopied] = useState(false);
   const copyWhole = async () => {
     const text = [message.content, message.code].filter(Boolean).join("\n\n");
     try {
       await navigator.clipboard.writeText(text);
+      setCopied(true);
+      // 轻提示：2 秒后恢复"复制"文案
+      setTimeout(() => setCopied(false), 2000);
     } catch {
       // 剪贴板不可用静默失败
-    }
-  };
-  const insertToFile = () => {
-    if (!message.code) return;
-    // 浏览器无法直接写本地文件，改为下载 solution.py（贴近"插入到文件"意图）
-    const blob = new Blob([message.code], { type: "text/plain;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "solution.py";
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-  const share = async () => {
-    try {
-      await navigator.clipboard.writeText(message.content);
-    } catch {
-      // 静默失败
     }
   };
 
@@ -283,9 +268,8 @@ function ChatMessageInner({ message, streaming = false, onRegenerate }: ChatMess
         <div className="mt-2 flex items-center justify-between">
           <MessageActions
             onCopy={copyWhole}
+            copied={copied}
             onRegenerate={onRegenerate ? () => onRegenerate(message.id) : undefined}
-            onInsert={insertToFile}
-            onShare={share}
           />
           <span className="flex items-center gap-2 text-[11px] text-gray-400 dark:text-gray-500">
             {message.model && <span>{message.model}</span>}

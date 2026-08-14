@@ -4,8 +4,15 @@
  * - 左侧：附件上传、代码插入等图标按钮
  * - 右侧：模型选择下拉 + 发送按钮
  * - 下方外部标注快捷键提示
+ * 说明：通过 ref 暴露 setValue，供欢迎页快捷任务模板点击后把提示词填入输入框。
  */
-import { useState } from "react";
+import { forwardRef, useImperativeHandle, useRef, useState } from "react";
+
+/** 外部操作句柄：允许父组件（如欢迎页）向输入框填入内容 */
+export interface ChatInputHandle {
+  /** 设置输入框内容（并聚焦） */
+  setValue: (text: string) => void;
+}
 
 interface ChatInputProps {
   /** 发送消息（多轮对话场景下，同会话内可连续调用）；model 为用户选择的模型名 */
@@ -17,9 +24,28 @@ interface ChatInputProps {
 /** 可用模型列表（与后端 LLM 配置对齐；实际模型名以 backend/.env 的 LLM_MODEL 为准） */
 const MODELS = ["deepseek-v4-flash-ga-260731", "deepseek-v3", "gpt-4o", "doubao-seed-2-1-turbo"];
 
-export function ChatInput({ onSend, disabled = false }: ChatInputProps) {
+/** 交互模式选项：当前仅 UI 壳（可选中，不影响发送逻辑，后端暂未消费） */
+const MODES = ["Craft", "Ask", "Plan"] as const;
+
+/** 当前工作空间（静态展示，不做切换） */
+const PROJECT_NAME = "databox";
+
+export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput(
+  { onSend, disabled = false },
+  ref,
+) {
   const [value, setValue] = useState("");
   const [model, setModel] = useState(MODELS[0]);
+  const [mode, setMode] = useState<(typeof MODES)[number]>(MODES[0]);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // 暴露外部设置值接口：欢迎页快捷任务点击后填入模板提示词
+  useImperativeHandle(ref, () => ({
+    setValue: (text: string) => {
+      setValue(text);
+      textareaRef.current?.focus();
+    },
+  }));
 
   const handleSend = () => {
     const content = value.trim();
@@ -49,6 +75,7 @@ export function ChatInput({ onSend, disabled = false }: ChatInputProps) {
 
           {/* 多行输入框 */}
           <textarea
+            ref={textareaRef}
             value={value}
             onChange={(e) => setValue(e.target.value)}
             onKeyDown={(e) => {
@@ -64,8 +91,21 @@ export function ChatInput({ onSend, disabled = false }: ChatInputProps) {
             className="max-h-40 flex-1 resize-none bg-transparent px-2 py-1.5 text-[15px] text-gray-800 placeholder:text-gray-400 focus:outline-none disabled:cursor-not-allowed dark:text-gray-100 dark:placeholder:text-gray-500"
           />
 
-          {/* 右侧：模型选择下拉 + 发送按钮 */}
+          {/* 右侧：模式切换(UI壳) + 模型选择下拉 + 发送按钮 */}
           <div className="flex shrink-0 items-center gap-1 self-center">
+            <select
+              value={mode}
+              onChange={(e) => setMode(e.target.value as (typeof MODES)[number])}
+              disabled={disabled}
+              title="选择模式"
+              className="h-8 cursor-pointer rounded-lg bg-transparent px-1.5 text-xs text-gray-500 transition-colors hover:bg-gray-200/60 focus:outline-none disabled:cursor-not-allowed dark:text-gray-400 dark:hover:bg-gray-700"
+            >
+              {MODES.map((m) => (
+                <option key={m} value={m} className="bg-white dark:bg-gray-800">
+                  {m}
+                </option>
+              ))}
+            </select>
             <select
               value={model}
               onChange={(e) => setModel(e.target.value)}
@@ -92,10 +132,15 @@ export function ChatInput({ onSend, disabled = false }: ChatInputProps) {
         </div>
 
         {/* 下方外部快捷键提示 */}
-        <p className="mt-1.5 text-center text-xs text-gray-400 dark:text-gray-500">
-          Enter 发送 · Shift + Enter 换行
+        <p className="mt-1.5 flex items-center justify-center gap-3 text-xs text-gray-400 dark:text-gray-500">
+          {/* 项目选择静态展示：当前仅展示固定工作空间，不做真实切换 */}
+          <span className="inline-flex items-center gap-1">
+            <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 7v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-6l-2-2H5a2 2 0 0 0-2 2Z" /></svg>
+            项目：{PROJECT_NAME}
+          </span>
+          <span>Enter 发送 · Shift + Enter 换行</span>
         </p>
       </div>
     </div>
   );
-}
+});

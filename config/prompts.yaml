@@ -51,3 +51,21 @@ refine:
   output_format: |
     只输出一个完整的 ```python ... ``` 代码块，不要包含任何解释性文字、前言或后记。
     代码必须语法合法、可直接运行。
+
+# ===== Test 测试生成提示词（nodes.py 使用，含简化重试） =====
+test:
+  generate: |
+    根据下面的 Python 代码生成一组 pytest 测试用例（只输出测试代码，不要解释）：
+    要求：覆盖正常输入、边界条件、异常分支；使用 pytest 的 assert 断言。
+
+    ```python
+    {code}
+    ```
+  generate_simple: |
+    为下面的 Python 代码写一个极简 pytest 测试文件：
+    要求：只输出一个 ```python 代码块，里面是一个 test_xxx 函数，
+    用 assert 验证最基本的一个行为即可。不要解释，不要多余内容。
+
+    ```python
+    {code}
+    ```

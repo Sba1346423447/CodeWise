@@ -38,8 +38,13 @@ def build_react_system_prompt(
     tools_desc: str,
     experiences: List[str],
     iteration: int = 0,
+    repo_map: str = "",
 ) -> str:
-    """组装 ReAct 系统提示词：基础指令 + 交付压力（按轮次）+ 可用工具 + 历史经验 + 输出格式。"""
+    """组装 ReAct 系统提示词：基础指令 + 交付压力（按轮次）+ 可用工具 + 历史经验 + 输出格式。
+
+    repo_map：可选的项目结构摘要（代码库感知），非空时追加"## 项目结构"章节；
+    为空时不注入，保持与旧调用完全兼容。
+    """
     templates = _load_templates()
     sections = [templates.get("system_prompt", "").strip()]
 
@@ -47,6 +52,9 @@ def build_react_system_prompt(
     delivery_hint = templates.get("delivery_hint", "").strip()
     if delivery_hint:
         sections.append(delivery_hint)
+
+    if repo_map.strip():
+        sections.append(f"## 项目结构(参考)\n{repo_map.strip()}")
 
     if tools_desc.strip():
         sections.append(f"## 可用工具\n{tools_desc.strip()}")

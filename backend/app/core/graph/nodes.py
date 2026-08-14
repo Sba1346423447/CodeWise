@@ -19,7 +19,10 @@ import asyncio
 import json
 import re
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+import yaml
 
 from ...llm.client import client
 from ...memory.experience_store import ExperienceStore
@@ -27,6 +30,7 @@ from ...utils.logger import get_logger
 from ..prompts.react import build_react_system_prompt, tools_to_text
 from ..prompts.refine import build_refine_prompt
 from ..prompts.reflection import build_reflection_prompt
+from ..repo_map import build_repo_map, load_repo_map_config
 from ..tools.registry import registry
 from ..tools.test_runner import TestRunner
 from .state import AgentState
@@ -37,23 +41,38 @@ logger = get_logger("graph.nodes")
 # 各图实例安全共享；反思记录则随 AgentState 流转（并发安全，见 reflect/refine 节点）
 experience_store = ExperienceStore()
 
-# 提取 LLM 输出中的 Python 代码块
-_CODE_BLOCK_RE = re.compile(r"```(?:python)?\s*(.*?)```", re.DOTALL)
+# 项目根：graph -> core -> app -> backend -> 根（与 prompts 模块同层级）
+_PROJECT_ROOT = Path(__file__).resolve().parents[4]
+# config/prompts.yaml 路径（测试生成提示词以配置层为单一事实来源）
+_CONFIG_PATH = _PROJECT_ROOT / "config" / "prompts.yaml"
 
-# 测试代码生成提示词（可迁移至 config/prompts.yaml 统一管理）
-_TEST_PROMPT = (
-    "根据下面的 Python 代码生成一组 pytest 测试用例（只输出测试代码，不要解释）：\n"
-    "要求：覆盖正常输入、边界条件、异常分支；使用 pytest 的 assert 断言。\n\n"
-    "```python\n{code}\n```"
-)
+# 提取 LLM 输出中的 Python 代码块：捕获语言标注，便于跳过非 python 标签块（如 ```json```）
+_CODE_BLOCK_RE = re.compile(r"```(\w*)\s*(.*?)```", re.DOTALL)
 
-# 测试生成失败后的简化重试提示词：降低 LLM 输出要求，提高成功率
-_TEST_PROMPT_SIMPLE = (
-    "为下面的 Python 代码写一个极简 pytest 测试文件：\n"
-    "要求：只输出一个 ```python 代码块，里面是一个 test_xxx 函数，"
-    "用 assert 验证最基本的一个行为即可。不要解释，不要多余内容。\n\n"
-    "```python\n{code}\n```"
-)
+
+def _load_test_templates() -> dict:
+    """读取 prompts.yaml 中的 test 模板（generate / generate_simple）。"""
+    raw = yaml.safe_load(_CONFIG_PATH.read_text(encoding="utf-8")) or {}
+    return raw.get("test", {})
+
+
+# repo-map 配置（模块级缓存，参考 edges.py 的 MAX_REFLECTION_ROUNDS 模式）：
+# root 留空 = 禁用代码库感知，不注入摘要，行为同现状
+_REPO_MAP_CONFIG = load_repo_map_config()
+_REPO_MAP_ROOT = str(_REPO_MAP_CONFIG.get("root", "") or "").strip()
+_REPO_MAP_MAX_CHARS = int(_REPO_MAP_CONFIG.get("max_chars", 2000))
+
+
+def _build_repo_map() -> str:
+    """生成 repo-map 摘要；未配置 root 或生成失败返回空串（不注入，行为同现状）。"""
+    if not _REPO_MAP_ROOT:
+        return ""
+    try:
+        return build_repo_map(_REPO_MAP_ROOT, max_chars=_REPO_MAP_MAX_CHARS)
+    except Exception:
+        logger.warning("repo-map 生成失败，本次不注入")
+        return ""
+
 
 # 工具调用参数 JSON 截断修复：JSON 被 max_tokens 截断成半截时，
 # 用此正则尽量从 arguments 中捞取 code 字段的值（允许最后未闭合）
@@ -61,7 +80,11 @@ _CODE_ARG_RE = re.compile(r'"code"\s*:\s*("(?:[^"\\]|\\.)*)', re.DOTALL)
 
 
 def extract_code(text: str) -> str:
-    """从 LLM 输出中提取首个 Python 代码块；无代码块或语法不合法时返回空字符串。
+    """从 LLM 输出中提取首个合法 Python 代码块；无合法块或语法不合法时返回空字符串。
+
+    多通道解析：用 findall 遍历所有代码块，跳过空块、非 Python 标签块（如 ```json```）、
+    语法非法块，取第一个通过 ast.parse 校验的合法 Python 块。无代码块时回退到整段文本
+    （兼容"全文即合法代码"场景）；无合法块返回空串，不返回解释文字。
 
     设计要点：不能"无代码块就返回原文"，否则 LLM 的解释文字（如"测试失败是因为..."）
     会被当成代码写入 current_code 并交付。用 ast.parse 做合法性校验，确保返回值
@@ -70,11 +93,22 @@ def extract_code(text: str) -> str:
     # 防御：None（LLM 返回异常）直接视为无代码
     if not text:
         return ""
-    match = _CODE_BLOCK_RE.search(text)
-    candidate = (match.group(1) if match else text).strip()
-    if not candidate:
+    # 多通道：遍历所有代码块，跳过空块 / 非 python 标签块（如 ```json```）/ 语法非法块，
+    # 取第一个通过 ast.parse 校验的合法 Python 块
+    for lang, candidate in _CODE_BLOCK_RE.findall(text):
+        # 语言标注存在且非 python/py 时视为非 Python 块，直接跳过（不参与 ast 校验）
+        if lang and lang.lower() not in ("python", "py"):
+            continue
+        candidate = candidate.strip()
+        if not candidate:
+            continue
+        if _is_valid_python(candidate):
+            return candidate
+    # 无代码块时回退到整段文本（保留既有语义，兼容全文即合法代码场景）
+    whole = text.strip()
+    if not whole:
         return ""
-    return candidate if _is_valid_python(candidate) else ""
+    return whole if _is_valid_python(whole) else ""
 
 
 def _is_valid_python(code: str) -> bool:
@@ -145,15 +179,31 @@ async def react_node(state: AgentState) -> Dict[str, Any]:
                 state.react_iterations, state.reflection_count, len(state.messages))
     tools_schema = registry.to_openai_schema()
     experiences = [exp["summary"] for exp in experience_store.retrieve_similar(state.task_desc)]
+    # 代码库感知：root 已配置时注入项目结构摘要，让 LLM 基于已有代码工作
+    repo_map = _build_repo_map()
     system_prompt = build_react_system_prompt(
-        tools_to_text(tools_schema), experiences, iteration=state.react_iterations
+        tools_to_text(tools_schema), experiences,
+        iteration=state.react_iterations, repo_map=repo_map,
     )
 
-    response = await client.chat(
+    response = await client.chat_or_none(
         messages=[{"role": "system", "content": system_prompt}, *state.messages],
         tools=tools_schema,
         model=state.model or None,
     )
+
+    # 容错调用：LLM 失败/超时返回 None，不中断任务，交付明确失败说明（不伪造成功）。
+    # 需先 return update，否则后续访问 response.choices[0] 会空引用报错。
+    if response is None:
+        update: Dict[str, Any] = {
+            "messages": [],
+            # 迭代计数自增，供 edges.py 判断 ReAct 是否超限
+            "react_iterations": state.react_iterations + 1,
+            "final_message": "模型调用失败，请检查 API 配置后重试。",
+        }
+        logger.warning("react_node 模型调用失败 | 迭代={} 已降级交付失败说明",
+                       update["react_iterations"])
+        return update
 
     assistant = response.choices[0].message
     finish_reason = response.choices[0].finish_reason or ""
@@ -241,8 +291,9 @@ async def _generate_test_code(code: str, model: str = "") -> str:
 
     容错调用：LLM 超时/失败返回空串，由 test_gen_node 重试或冒烟测试兜底。
     """
+    prompt = _load_test_templates().get("generate", "").format(code=code)
     response = await client.chat_or_none(
-        messages=[{"role": "system", "content": _TEST_PROMPT.format(code=code)}],
+        messages=[{"role": "system", "content": prompt}],
         model=model or None,
     )
     return extract_code(response.choices[0].message.content or "") if response else ""
@@ -283,8 +334,9 @@ async def _generate_test_code_retry(code: str, model: str = "") -> str:
     if first.strip():
         return first
     logger.warning("test_gen_node 重试生成测试代码（简化提示词）")
+    prompt = _load_test_templates().get("generate_simple", "").format(code=code)
     response = await client.chat_or_none(
-        messages=[{"role": "system", "content": _TEST_PROMPT_SIMPLE.format(code=code)}],
+        messages=[{"role": "system", "content": prompt}],
         model=model or None,
     )
     return extract_code(response.choices[0].message.content or "") if response else ""

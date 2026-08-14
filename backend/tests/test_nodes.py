@@ -32,6 +32,40 @@ class TestExtractCode:
         assert extract_code("") == ""
         assert extract_code(None) == ""
 
+    def test_多代码块_取首个合法python块(self):
+        # 首个 python 块合法，即使后面还有 json / python 块也应取第一个合法 python
+        text = (
+            "```python\ndef add(a, b):\n    return a + b\n```\n"
+            "```json\n{\"a\": 1}\n```\n"
+            "```python\nprint('第二个')\n```"
+        )
+        assert extract_code(text) == "def add(a, b):\n    return a + b"
+
+    def test_首块非python_取后续合法python块(self):
+        # 第一个代码块是 json（非法 python），应跳过并取后续合法 python 块
+        text = (
+            "```json\n{\"a\": 1}\n```\n"
+            "```python\ndef sub(a, b):\n    return a - b\n```"
+        )
+        assert extract_code(text) == "def sub(a, b):\n    return a - b"
+
+    def test_首块语法非法_取后续合法python块(self):
+        # 第一个代码块语法非法（未闭合括号），应跳过并取后续合法块
+        text = (
+            "```python\ndef broken(:\n```\n"
+            "```python\nprint('修复后的合法代码')\n```"
+        )
+        assert extract_code(text) == "print('修复后的合法代码')"
+
+    def test_所有代码块均非法_返回空(self):
+        # 全部代码块均非合法 python（json + 语法错误），应返回空串而非解释文字
+        text = (
+            "```json\n{\"a\": 1}\n```\n"
+            "```python\ndef broken(:\n```\n"
+            "下面是我对实现的分析……"
+        )
+        assert extract_code(text) == ""
+
 
 class TestExtractCodeFromToolArguments:
     """_extract_code_from_tool_arguments：标准 JSON + 截断 JSON 双通道兜底。"""
