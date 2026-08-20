@@ -10,6 +10,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ChatInput, type ChatInputHandle } from "./components/ChatInput";
+import { ConfirmationDialog } from "./components/ConfirmationDialog";
 import type { ChatMessageData } from "./components/ChatMessage";
 import { FileTree } from "./components/FileTree";
 import { MessageList } from "./components/MessageList";
@@ -51,7 +52,17 @@ function initTheme(): "dark" | "light" {
 
 export default function App() {
   const { sessions, loading, remove, refresh } = useSessionHistory();
-  const { status, messages, error, run, reset, typingAssistantId } = useAgentSSE();
+  const {
+    status,
+    messages,
+    error,
+    run,
+    reset,
+    confirm,
+    stop,
+    typingAssistantId,
+    pendingConfirmation,
+  } = useAgentSSE();
 
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [historyDetail, setHistoryDetail] = useState<HistoryDetail | null>(null);
@@ -125,6 +136,12 @@ export default function App() {
     setHistoryDetail(null); // 进入实时，隐藏历史回放
     await run(content, activeSessionId ?? undefined, model);
     await refresh(); // 会话列表反映新建/更新
+  };
+
+  /** 人工确认响应：批准/拒绝挂起的操作，恢复图线程；完成后刷新会话列表 */
+  const handleConfirm = async (approved: boolean) => {
+    await confirm(approved);
+    await refresh();
   };
 
   /** 新建对话：清空当前对话上下文，开始新一轮（新会话不继承旧记忆） */
@@ -397,7 +414,15 @@ export default function App() {
         {error && (
           <p className="px-6 pb-1 text-center text-sm text-danger">{error}</p>
         )}
-        <ChatInput ref={chatInputRef} onSend={handleSend} disabled={isBusy} />
+        {/* 安全审查人工确认：第四层 human-in-the-loop，挂在输入区上方 */}
+        {pendingConfirmation && (
+          <ConfirmationDialog
+            confirmation={pendingConfirmation}
+            onRespond={handleConfirm}
+            busy={status === "running"}
+          />
+        )}
+        <ChatInput ref={chatInputRef} onSend={handleSend} disabled={isBusy} onStop={stop} />
       </main>
     </div>
     </ErrorBoundary>

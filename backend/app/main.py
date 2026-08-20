@@ -58,6 +58,12 @@ app.include_router(sessions.router)
 app.include_router(export.router)
 
 
+@app.get("/health")
+async def health() -> dict:
+    """健康检查接口，返回服务状态。"""
+    return {"status": "ok"}
+
+
 if __name__ == "__main__":
     import uvicorn
 

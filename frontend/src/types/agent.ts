@@ -7,7 +7,12 @@
 export type StepType = "react" | "tool" | "reflect" | "refine";
 
 /** 会话状态（与后端 session.py 的 STATUS_* 对齐） */
-export type SessionStatus = "running" | "completed" | "failed";
+export type SessionStatus =
+  | "running"
+  | "completed"
+  | "failed"
+  | "stopped"
+  | "awaiting_confirmation";
 
 /** OpenAI 兼容消息（与后端 LLM messages 格式一致） */
 export interface Message {
@@ -57,6 +62,24 @@ export interface TestResults {
   output?: string;
 }
 
+/** 安全审查待确认的单个工具操作（对应后端 confirm_node 的 interrupt value） */
+export interface PendingTool {
+  /** 工具名，如 file_editor / code_executor */
+  tool: string;
+  /** 工具参数（原始 JSON 反序列化后的对象） */
+  args: Record<string, unknown>;
+  /** 风险分类器给出的判定理由 */
+  reason: string;
+}
+
+/** 安全审查挂起信息（confirmation_required 事件 / done 结果的 pending_confirmation） */
+export interface PendingConfirmation {
+  /** 挂起的图线程 ID：确认时回传后端恢复执行 */
+  run_id: string;
+  /** 待确认的工具操作列表 */
+  tools: PendingTool[];
+}
+
 /** Agent 最终交付结果（对应后端 orchestrator._build_result 返回） */
 export interface AgentResult {
   task_desc: string;
@@ -73,6 +96,10 @@ export interface AgentResult {
   model?: string;
   /** 本轮行动摘要（供前端折叠展示，可空） */
   thinking?: ThinkingItem[];
+  /** 用户手动停止：done 事件由停止收尾分支推送（前端停止时通常已断开，容错字段） */
+  stopped?: boolean;
+  /** 安全审查挂起信息：非空表示图在人工确认处暂停，未产出交付物 */
+  pending_confirmation?: PendingConfirmation | null;
 }
 
 /** Agent 任务请求体（对应后端 agent.py 的 AgentRequest） */
@@ -132,11 +159,12 @@ export interface SessionInfo {
   messages?: StoredMessage[];
 }
 
-/** SSE 事件（判别联合，与后端 sse.py 的 6 个事件名严格对齐） */
+/** SSE 事件（判别联合，与后端 sse.py 的 7 个事件名严格对齐） */
 export type SSEEvent =
-  | { type: "agent_start"; data: { session_id: string } }
+  | { type: "agent_start"; data: { session_id: string; run_id: string } }
   | { type: "node"; data: { node: string; update: Record<string, unknown> } }
   | { type: "content"; data: { delta: string } }
   | { type: "tool_calls"; data: { delta: ToolCall[] } }
+  | { type: "confirmation_required"; data: PendingConfirmation }
   | { type: "done"; data: AgentResult }
   | { type: "error"; data: { message: string } };

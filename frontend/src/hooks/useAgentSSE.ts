@@ -4,6 +4,8 @@
  * 流式策略（与后端 agent.py 事件契约严格对齐）：
  * - agent_start：记录当前 sessionId（新建会话时后端返回）。
  * - node：实时聚合到当前助手消息的"行动摘要"（思考过程逐步出现）。
+ * - confirmation_required：安全审查挂起（human-in-the-loop），记录待确认操作，
+ *   由上层渲染确认对话框；用户响应后调 confirm(approved) 恢复挂起线程。
  * - done：携带最终结果，前端双路并行打字机渲染——
  *   ① 正文（总结 + 测试结论）逐字敲出；
  *   ② 最终代码以 IDE 风格"代码文件"视图逐行敲出。
@@ -13,7 +15,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AgentResult, SSEEvent, ThinkingItem } from "../types/agent";
+import type { AgentResult, PendingConfirmation, SSEEvent, ThinkingItem } from "../types/agent";
 import type { ChatMessageData } from "../components/ChatMessage";
 
 /** SSE 运行状态 */
@@ -42,7 +44,7 @@ function parseSSEBlock(block: string): SSEEvent | null {
 /** 图节点名 → 行动摘要条目类型（与后端 orchestrator 提炼的 thinking 结构对齐） */
 function nodeToThinkingType(node: string): ThinkingItem["type"] {
   const stepType = node.replace("_node", "");
-  if (["tool", "test_gen", "test"].includes(stepType)) return "tool";
+  if (["tool", "review", "confirm", "test_gen", "test"].includes(stepType)) return "tool";
   if (stepType === "reflect") return "reflect";
   if (stepType === "refine" || stepType === "finalize") return "refine";
   return "react";
@@ -51,6 +53,8 @@ function nodeToThinkingType(node: string): ThinkingItem["type"] {
 /** 图节点名 → 行动摘要标题 */
 const NODE_LABELS: Record<string, string> = {
   react_node: "分析需求",
+  review_node: "安全审查",
+  confirm_node: "等待确认",
   tool_node: "执行工具",
   test_gen_node: "生成验证",
   test_node: "运行验证",
@@ -82,9 +86,13 @@ export function useAgentSSE() {
   const [error, setError] = useState<string | null>(null);
   /** 正在打字机输出的助手消息 id（null = 无打字中消息），精确驱动光标/脉冲点/输入框解锁 */
   const [typingAssistantId, setTypingAssistantId] = useState<string | null>(null);
+  /** 安全审查挂起信息（confirmation_required 事件）：非空时渲染确认对话框 */
+  const [pendingConfirmation, setPendingConfirmation] = useState<PendingConfirmation | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
   const sessionIdRef = useRef<string>("");
+  /** 当前轮图执行线程 ID（agent_start 事件返回）：停止生成时回传后端取消任务 */
+  const runIdRef = useRef<string>("");
   const seqRef = useRef(0);
   // 双打字机：正文逐字 / 代码逐行
   const typingRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -156,22 +164,29 @@ export function useAgentSSE() {
     [],
   );
 
-  /** 执行一次 SSE 请求；返回是否正常结束 */
+  /** 执行一次 SSE 请求；返回是否正常结束。
+   * resumeConfirmation 非空时为人工确认恢复模式：请求体携带 confirmation，
+   * 不新建用户消息，新增一条助手消息继续接收恢复轮事件。 */
   const executeOnce = useCallback(
     async (
       taskDesc: string,
       sessionId: string,
       signal: AbortSignal,
       model?: string,
+      resumeConfirmation?: { run_id: string; approved: boolean },
     ): Promise<boolean> => {
       const response = await fetch("/api/agent", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          task_desc: taskDesc,
-          session_id: sessionId || undefined,
-          model: model || undefined,
-        }),
+        body: JSON.stringify(
+          resumeConfirmation
+            ? { session_id: sessionId, confirmation: resumeConfirmation }
+            : {
+                task_desc: taskDesc,
+                session_id: sessionId || undefined,
+                model: model || undefined,
+              },
+        ),
         signal,
       });
       if (!response.ok || !response.body) {
@@ -182,19 +197,23 @@ export function useAgentSSE() {
       const decoder = new TextDecoder("utf-8");
       let buffer = "";
 
-      // 本轮新增消息：占位用户消息 + 助手消息
-      const userMsg: ChatMessageData = {
-        id: `u-${Date.now()}-${++seqRef.current}`,
-        role: "user",
-        content: taskDesc,
-      };
+      // 本轮新增消息：正常模式带占位用户消息；恢复模式仅助手消息（对话继续）
       const assistantMsg: ChatMessageData = {
         id: `a-${Date.now()}-${++seqRef.current}`,
         role: "assistant",
         content: "",
         thinking: [],
       };
-      setMessages((prev) => [...prev, userMsg, assistantMsg]);
+      if (resumeConfirmation) {
+        setMessages((prev) => [...prev, assistantMsg]);
+      } else {
+        const userMsg: ChatMessageData = {
+          id: `u-${Date.now()}-${++seqRef.current}`,
+          role: "user",
+          content: taskDesc,
+        };
+        setMessages((prev) => [...prev, userMsg, assistantMsg]);
+      }
       // 锁定"正在生成"的助手消息：光标/脉冲点/输入框禁用精确跟踪到该消息
       setTypingAssistantId(assistantMsg.id);
 
@@ -213,6 +232,12 @@ export function useAgentSSE() {
           switch (event.type) {
             case "agent_start":
               sessionIdRef.current = event.data.session_id;
+              runIdRef.current = event.data.run_id;
+              break;
+            case "confirmation_required":
+              // 安全审查挂起：记录待确认操作，上层据此弹确认对话框；
+              // SSE 流随后以 done（pending_confirmation 非空）收尾，打字机输出等待文案
+              setPendingConfirmation(event.data);
               break;
             case "node": {
               // 逐步聚合行动摘要到当前助手消息（思考过程流式出现）
@@ -234,6 +259,7 @@ export function useAgentSSE() {
               const result = event.data as AgentResult;
               const finalCode = (result.final_code ?? "").trim();
               // 通用问答模式（无代码交付）：不挂载代码文件视图/测试徽章/测试面板，只展示正文。
+              // 安全审查挂起（pending_confirmation 非空）同样无代码交付，正文输出等待文案。
               // 历史问答消息同样据此判断（见 App.tsx handleSelect）。
               const isAnswerOnly = !finalCode;
               // 注意：此处不立即置 done——打字机运行期间保持 running，
@@ -256,9 +282,12 @@ export function useAgentSSE() {
                 ),
               );
               const summary = (result.final_message ?? "").trim();
-              const verifyNote = isAnswerOnly
-                ? ""
-                : `${result.tests_passed ? "✅ 已完成" : "⚠️ 需要优化"} · 已优化 ${result.reflection_count} 轮`;
+              // 挂起轮：正文打"等待确认"徽标而非测试结论（尚未跑测试链路）
+              const verifyNote = result.pending_confirmation
+                ? "⏸ 等待人工确认"
+                : isAnswerOnly
+                  ? ""
+                  : `${result.tests_passed ? "✅ 已完成" : "⚠️ 需要优化"} · 已优化 ${result.reflection_count} 轮`;
               const target = [summary, verifyNote].filter(Boolean).join("\n\n");
               const backendThinking = normalizeThinking(result.thinking);
               await Promise.all([
@@ -303,6 +332,7 @@ export function useAgentSSE() {
       stopTyping();
       setStatus("running");
       setError(null);
+      setPendingConfirmation(null);
       seqRef.current = 0;
       sessionIdRef.current = sessionId ?? "";
 
@@ -320,8 +350,49 @@ export function useAgentSSE() {
     [executeOnce, stopTyping],
   );
 
-  /** 手动停止当前 SSE 流与打字机 */
+  /** 人工确认：批准/拒绝安全审查挂起的操作，恢复图线程继续执行 */
+  const confirm = useCallback(
+    async (approved: boolean) => {
+      const pending = pendingConfirmation;
+      if (!pending || !sessionIdRef.current) return;
+      stopTyping();
+      setPendingConfirmation(null);
+      setStatus("running");
+      setError(null);
+
+      const controller = new AbortController();
+      abortRef.current = controller;
+      try {
+        await executeOnce(
+          "",
+          sessionIdRef.current,
+          controller.signal,
+          undefined,
+          { run_id: pending.run_id, approved },
+        );
+      } catch (err) {
+        if (controller.signal.aborted) return;
+        setError((err as Error).message);
+        setStatus("error");
+        setTypingAssistantId(null);
+      }
+    },
+    [executeOnce, pendingConfirmation, stopTyping],
+  );
+
+  /** 手动停止：先通知后端取消图执行任务（真正终止 LLM 调用），再断开本地 SSE 与打字机 */
   const stop = useCallback(() => {
+    // 后端取消（fire-and-forget）：run_id 定位运行任务；失败不阻塞本地停止
+    if (runIdRef.current) {
+      fetch("/api/agent/stop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ run_id: runIdRef.current }),
+      }).catch(() => {
+        /* 后端不可达时仍继续本地停止（仅断开流，任务由后端超时兜底） */
+      });
+      runIdRef.current = "";
+    }
     stopTyping();
     setTypingAssistantId(null);
     abortRef.current?.abort();
@@ -335,6 +406,7 @@ export function useAgentSSE() {
     setMessages([]);
     setStatus("idle");
     setError(null);
+    setPendingConfirmation(null);
     sessionIdRef.current = "";
   }, [stopTyping]);
 
@@ -353,7 +425,9 @@ export function useAgentSSE() {
     run,
     stop,
     reset,
+    confirm,
     typingAssistantId,
+    pendingConfirmation,
     sessionId: sessionIdRef.current,
   };
 }

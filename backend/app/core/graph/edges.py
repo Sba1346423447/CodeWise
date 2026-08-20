@@ -1,13 +1,18 @@
 """条件边逻辑：根据工具调用 / 代码产出 / 测试结果 / 反思轮次路由节点流转。
 
 依赖：langgraph.graph（END 常量）、pyyaml（读取 settings.yaml 反思轮次上限）。
-新拓扑（生成 → 测试 → 反思 → 优化 → 交付）：
-- react_node → tool_node（有工具调用）或 test_gen_node（已产出代码）
+新拓扑（生成 → 审查 → 测试 → 反思 → 优化 → 交付）：
+- react_node → review_node（有工具调用，先过安全审查）/ code_review_node（已产出代码，
+  代码也要过安全审查——test_node 会真实执行）/ test_gen_node（无代码收尾）
+- review_node → tool_node（allow）/ confirm_node（confirm）/ react_node（block，拦截消息已回填）
+- confirm_node → tool_node（用户批准）/ react_node（用户拒绝，拒绝消息已回填）
+- code_review_node → test_gen_node（allow）/ code_confirm_node（confirm）/ react_node（block）
+- code_confirm_node → test_gen_node（用户批准）/ react_node（用户拒绝，拒绝消息已回填）
 - tool_node → react_node（闭合 ReAct 循环）
 - test_gen_node → test_node
 - test_node → reflect_node（无论通过与否都进入反思收尾）
 - reflect_node → finalize_node（测试通过 / 反思轮次超限 / 反思失效）或 refine_node
-- refine_node → test_gen_node（代码已变，重新生成测试后再验证）
+- refine_node → code_review_node（代码已变，先过安全审查再重新生成测试验证）
 - finalize_node → END
 """
 
@@ -73,20 +78,20 @@ def _count_consecutive_tool_failures(messages: List[Dict[str, Any]], limit: int)
 
 
 def route_after_react(state: AgentState) -> str:
-    """react_node 之后路由（优先保证"产出代码即进入测试链路"）：
-    - 已产出 current_code → test_gen_node（生成测试后走强制测试）
+    """react_node 之后路由（优先保证"产出代码先过安全审查"）：
+    - 已产出 current_code → code_review_node（test_node 会真实执行代码，必须先审查）
     - 迭代超限 → test_gen_node（强制收尾，不再无限调工具）
     - 连续多次工具失败 → test_gen_node（LLM 反复重试同一无效操作时快速跳出）
-    - 最近一条 assistant 消息带 tool_calls → tool_node（执行工具）
+    - 最近一条 assistant 消息带 tool_calls → review_node（先过安全审查链路）
     - 否则（无代码无工具）→ test_gen_node（进入收尾链路，finalize 兜底）
     """
     # 通用问答：react_node 已判定为纯文本回答，直接交付，跳过测试/反思/优化链路
     if state.is_answer_only:
         return "finalize_node"
 
-    # 一旦产出代码，立即进入测试链路（最高优先级）
+    # 一旦产出代码，先过代码安全审查（最高优先级）
     if state.current_code and state.current_code.strip():
-        return "test_gen_node"
+        return "code_review_node"
 
     # 迭代超限或连续工具失败：强制收尾
     if state.react_iterations >= MAX_REACT_ITERATIONS:
@@ -99,10 +104,58 @@ def route_after_react(state: AgentState) -> str:
 
     last = state.messages[-1]
     if last.get("tool_calls"):
-        return "tool_node"
+        return "review_node"
     if last.get("role") == "tool":
         return "react_node"
     return "test_gen_node"
+
+
+def route_after_review(state: AgentState) -> str:
+    """review_node 之后路由（按安全审查结论分发）：
+    - allow（全部安全）→ tool_node 直接执行
+    - confirm（存在可疑操作）→ confirm_node 挂起等待人工确认（interrupt）
+    - block（拦截，拦截消息已回填 messages）→ react_node 让 LLM 重新决策
+    """
+    outcome = state.security_outcome
+    if outcome == "allow":
+        return "tool_node"
+    if outcome == "confirm":
+        return "confirm_node"
+    return "react_node"
+
+
+def route_after_confirm(state: AgentState) -> str:
+    """confirm_node 之后路由（按人工确认结果分发）：
+    - 批准 → tool_node 执行
+    - 拒绝（拒绝消息已回填 messages）→ react_node 让 LLM 换方案
+    """
+    if state.security_confirmation:
+        return "tool_node"
+    return "react_node"
+
+
+def route_after_code_review(state: AgentState) -> str:
+    """code_review_node 之后路由（按代码审查结论分发）：
+    - allow（安全）→ test_gen_node 生成测试进入验证链路
+    - confirm（网络外联等确认级）→ code_confirm_node 挂起等待人工确认（interrupt）
+    - block（拦截级，拦截反馈已回填 messages 且代码已清空）→ react_node 重新生成
+    """
+    outcome = state.security_outcome
+    if outcome == "allow":
+        return "test_gen_node"
+    if outcome == "confirm":
+        return "code_confirm_node"
+    return "react_node"
+
+
+def route_after_code_confirm(state: AgentState) -> str:
+    """code_confirm_node 之后路由（按人工确认结果分发）：
+    - 批准 → test_gen_node 进入测试链路（代码指纹已记录，回环不重复弹窗）
+    - 拒绝（拒绝反馈已回填 messages 且代码已清空）→ react_node 换方案
+    """
+    if state.security_confirmation:
+        return "test_gen_node"
+    return "react_node"
 
 
 def route_after_reflect(state: AgentState) -> str:

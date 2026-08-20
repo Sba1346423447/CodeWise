@@ -75,7 +75,8 @@ class TestFileEditorWrite:
 
 class TestFileEditorSecurity:
     def test_越权路径_拒绝(self, editor):
-        result = editor.execute(action="read", path="../secret.txt")
+        # 注意避开敏感文件关键词（secret/token 等），命中敏感规则会先于越权校验拦截
+        result = editor.execute(action="read", path="../outside.txt")
         assert result["success"] is False
         assert "超出项目根目录" in result["error"]
 
@@ -86,6 +87,24 @@ class TestFileEditorSecurity:
         result = editor.execute(action="write", path=os.path.abspath("escape.py"), content="x")
         assert result["success"] is False
         assert "超出项目根目录" in result["error"]
+
+    def test_敏感文件env_读取拒绝(self, editor):
+        # 第二层工具自检：密钥/凭据文件禁止读写（防 .env 内容泄露给 LLM）
+        result = editor.execute(action="read", path=".env")
+        assert result["success"] is False
+        assert "敏感文件" in result["error"]
+
+    def test_敏感文件pem_写入拒绝(self, editor):
+        result = editor.execute(action="write", path="certs/server.pem", content="x")
+        assert result["success"] is False
+        assert "敏感文件" in result["error"]
+
+    def test_普通文件_不受敏感规则影响(self, editor, root_dir):
+        import pathlib
+
+        result = editor.execute(action="write", path="normal.py", content="x = 1")
+        assert result["success"] is True
+        assert (pathlib.Path(root_dir) / "normal.py").exists()
 
     def test_root未配置_拒绝(self, monkeypatch):
         monkeypatch.setattr(

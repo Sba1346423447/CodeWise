@@ -13,6 +13,9 @@ EVENT_CONTENT = "content"
 EVENT_TOOL_CALL = "tool_calls"
 EVENT_DONE = "done"
 EVENT_ERROR = "error"
+# 安全审查挂起：confirm_node interrupt，携带 run_id 与待确认工具列表，
+# 前端据此弹确认对话框，用户响应后带 confirmation 字段重新请求恢复线程
+EVENT_CONFIRMATION = "confirmation_required"
 
 
 def format_sse(event: str, data: Dict[str, Any]) -> str:

@@ -1,13 +1,17 @@
 """文件编辑工具：让 Agent 读取或写入项目文件（文本），对标 Aider 的编辑能力。
 
-安全边界：目标路径必须位于配置的项目根目录内（repo_map.root），用 Path.resolve()
-归一化后以 is_relative_to 校验，防止 ../ 越权写入；root 未配置时拒绝操作。
+安全边界（第二层·工具自检）：
+1. 目标路径必须位于配置的项目根目录内（repo_map.root），用 Path.resolve()
+   归一化后以 is_relative_to 校验，防止 ../ 越权写入；root 未配置时拒绝操作。
+2. 目标路径命中敏感文件规则（.env / 密钥 / 凭据，规则同 security.rule_filter）
+   时拒绝读写——路径越权校验挡"界外"，敏感文件防护挡"界内的机密"。
 """
 
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
 from ..repo_map import load_repo_map_config
+from ..security.rule_filter import check_path_patterns
 from .base import Tool
 
 # 单次读取的大小上限（超过则截断并提示）
@@ -50,6 +54,10 @@ class FileEditor(Tool):
         root = str(load_repo_map_config().get("root", "") or "").strip()
         if not root:
             return None, "未配置项目根目录"
+        # 敏感文件防护：密钥/凭据/环境变量文件禁止读写（与第一层规则共用规则库）
+        sensitive = check_path_patterns(path)
+        if sensitive:
+            return None, sensitive
         root_path = Path(root).resolve()
         try:
             target = (root_path / path).resolve()

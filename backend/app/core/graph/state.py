@@ -3,7 +3,7 @@
 依赖：pydantic（BaseModel + Field 定义状态 schema）；字段追加策略见 _append_items。
 """
 
-from typing import Annotated, Any, Dict, List
+from typing import Annotated, Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -61,3 +61,17 @@ class AgentState(BaseModel):
     # 通用问答模式：react_node 判定 LLM 无代码、无工具调用，输出即为自然语言回答。
     # 为 True 时图跳过测试/反思/优化链路，finalize_node 直接交付 final_message 文本。
     is_answer_only: bool = False
+    # ===== 安全审查（四层链路）=====
+    # 审查结论：allow（放行执行）/ block（拦截，拦截消息已回填）/ confirm（需人工确认）
+    # 由 review_node 写入；react_node 每轮新决策时重置为空
+    security_outcome: str = ""
+    # 逐工具审查详情：tool_call_id -> {"verdict", "reason", "tool", "args"}
+    # confirm 场景下 interrupt 前必须先落 state（节点中断会丢局部变量，
+    # 恢复重跑时 confirm_node 从这里读待确认信息，避免重复调用风险分类 LLM）
+    security_decisions: Dict[str, Any] = Field(default_factory=dict)
+    # 人工确认结果：True 批准 / False 拒绝（confirm_node 从 interrupt 恢复后写入）
+    security_confirmation: Optional[bool] = None
+    # 已通过审查的代码内容指纹（sha256）：code_review_node 放行（含人工批准）时写入。
+    # 测试失败回环（refine 未改动代码）再次进入代码审查时凭指纹跳过，
+    # 避免同一份已批准代码反复弹窗；代码内容一变指纹即失配，重新走完整审查
+    reviewed_code_hash: str = ""

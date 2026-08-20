@@ -17,8 +17,10 @@ export interface ChatInputHandle {
 interface ChatInputProps {
   /** 发送消息（多轮对话场景下，同会话内可连续调用）；model 为用户选择的模型名 */
   onSend: (content: string, model?: string) => void;
-  /** Agent 执行中：禁用输入与发送 */
+  /** Agent 执行中：禁用输入与发送；传入 onStop 时执行中按钮切换为"停止生成" */
   disabled?: boolean;
+  /** 停止生成：执行中点击（通知后端取消任务 + 断开本地 SSE） */
+  onStop?: () => void;
 }
 
 /** 可用模型列表（与后端 LLM 配置对齐；实际模型名以 backend/.env 的 LLM_MODEL 为准） */
@@ -31,7 +33,7 @@ const MODES = ["Craft", "Ask", "Plan"] as const;
 const PROJECT_NAME = "databox";
 
 export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput(
-  { onSend, disabled = false },
+  { onSend, disabled = false, onStop },
   ref,
 ) {
   const [value, setValue] = useState("");
@@ -119,15 +121,28 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
                 </option>
               ))}
             </select>
-            <button
-              type="button"
-              onClick={handleSend}
-              disabled={disabled || !value.trim()}
-              aria-label="发送"
-              className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand-600 text-white transition-colors hover:bg-brand-700 focus:outline-none disabled:cursor-not-allowed disabled:bg-gray-300 dark:disabled:bg-gray-600"
-            >
-              <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 19V5" /><path d="m5 12 7-7 7 7" /></svg>
-            </button>
+            {disabled && onStop ? (
+              /* 执行中：发送切换为停止（通知后端取消任务 + 断开本地 SSE） */
+              <button
+                type="button"
+                onClick={onStop}
+                aria-label="停止生成"
+                title="停止生成"
+                className="flex h-8 w-8 items-center justify-center rounded-lg bg-danger text-white transition-colors hover:bg-red-600 focus:outline-none"
+              >
+                <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="2" /></svg>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={handleSend}
+                disabled={disabled || !value.trim()}
+                aria-label="发送"
+                className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand-600 text-white transition-colors hover:bg-brand-700 focus:outline-none disabled:cursor-not-allowed disabled:bg-gray-300 dark:disabled:bg-gray-600"
+              >
+                <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 19V5" /><path d="m5 12 7-7 7 7" /></svg>
+              </button>
+            )}
           </div>
         </div>
 

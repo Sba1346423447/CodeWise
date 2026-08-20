@@ -16,6 +16,7 @@ core.prompts.*（提示词组装）、core.tools.*（工具执行）。
 """
 
 import asyncio
+import hashlib
 import json
 import re
 import time
@@ -23,6 +24,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import yaml
+from langgraph.types import interrupt
 
 from ...llm.client import client
 from ...memory.experience_store import ExperienceStore
@@ -31,6 +33,18 @@ from ..prompts.react import build_react_system_prompt, tools_to_text
 from ..prompts.refine import build_refine_prompt
 from ..prompts.reflection import build_reflection_prompt
 from ..repo_map import build_repo_map, load_repo_map_config
+from ..security.risk_classifier import (
+    RISK_BLOCKED,
+    RISK_CONFIRM,
+    classify_tool_call,
+)
+from ..security.rule_filter import (
+    SECURITY_ENABLED,
+    check_code_confirm_patterns,
+    check_code_patterns,
+    check_tool_call,
+    check_tool_call_confirm,
+)
 from ..tools.registry import registry
 from ..tools.test_runner import TestRunner
 from .state import AgentState
@@ -200,6 +214,9 @@ async def react_node(state: AgentState) -> Dict[str, Any]:
             # 迭代计数自增，供 edges.py 判断 ReAct 是否超限
             "react_iterations": state.react_iterations + 1,
             "final_message": "模型调用失败，请检查 API 配置后重试。",
+            # 重置安全审查状态：新一轮决策尚未审查
+            "security_outcome": "",
+            "security_confirmation": None,
         }
         logger.warning("react_node 模型调用失败 | 迭代={} 已降级交付失败说明",
                        update["react_iterations"])
@@ -215,6 +232,9 @@ async def react_node(state: AgentState) -> Dict[str, Any]:
         "messages": [message],
         # 迭代计数自增，供 edges.py 判断 ReAct 是否超限
         "react_iterations": state.react_iterations + 1,
+        # 重置安全审查状态：新一轮工具调用需重新过审查链路
+        "security_outcome": "",
+        "security_confirmation": None,
     }
 
     # 代码提取双通道：content 代码块优先，其次工具参数（含截断兜底）
@@ -254,8 +274,300 @@ async def react_node(state: AgentState) -> Dict[str, Any]:
     return update
 
 
+async def review_node(state: AgentState) -> Dict[str, Any]:
+    """安全审查节点（第一层规则过滤 + 第三层 AI 风险分类）。
+
+    审查最后一条 assistant 消息中的全部工具调用，产出三级结论：
+    - allow：全部安全，路由到 tool_node 直接执行
+    - block：任一命中危险规则或被判明确恶意，本轮全部拦截（拦截消息回填，
+      LLM 收到失败 Observation 自行调整；连续失败护栏防其死缠烂打）
+    - confirm：存在可疑但可能有正当理由的操作，路由到 confirm_node 挂起等待人工确认
+
+    设计要点：审查结论必须先写入 state 再 interrupt（confirm_node 消费）——
+    节点中断会丢失局部变量，恢复重跑时不能重复调用风险分类 LLM，
+    更要杜绝"第二次判 SAFE 绕过人工确认直接执行"的安全漏洞。
+    第二层工具自检（file_editor 路径/敏感文件校验）在工具 execute 内部，
+    不在本节点重复实现。
+    """
+    last_assistant = None
+    for message in reversed(state.messages):
+        if message.get("tool_calls"):
+            last_assistant = message
+            break
+    if last_assistant is None:
+        # 异常兜底：无待审查的工具调用，交回 react_node 重新决策
+        logger.warning("review_node 未找到工具调用消息，放行回 react_node")
+        return {"security_outcome": "block", "security_decisions": {}}
+
+    # 总开关关闭：整个审查链路短路，等价于链路加入前的行为
+    if not SECURITY_ENABLED:
+        return {"security_outcome": "allow", "security_decisions": {}}
+
+    decisions: Dict[str, Any] = {}
+    blocked_reason = ""
+    needs_confirm = False
+    for tc in last_assistant["tool_calls"]:
+        name = tc["function"]["name"]
+        try:
+            args = json.loads(tc["function"]["arguments"] or "{}")
+        except json.JSONDecodeError:
+            args = {}
+        # 第一层·拦截级：确定性规则过滤（零成本，先拦明确的）
+        reason = check_tool_call(name, args)
+        if reason:
+            decisions[tc["id"]] = {"verdict": "blocked", "reason": reason, "tool": name}
+            blocked_reason = reason
+            logger.warning("规则过滤拦截 | 工具={} 原因={}", name, reason)
+            continue
+        # 第一层·确认级：网络外联等可疑但有正当用途的操作，挂起等人工确认
+        confirm_reason = check_tool_call_confirm(name, args)
+        if confirm_reason:
+            decisions[tc["id"]] = {
+                "verdict": RISK_CONFIRM, "reason": confirm_reason,
+                "tool": name, "args": args,
+            }
+            needs_confirm = True
+            logger.info("规则过滤确认级命中 | 工具={} 原因={}", name, confirm_reason)
+            continue
+        # 第三层：AI 风险分类（语义判别 prompt 注入等规则拦不住的攻击）
+        verdict = await classify_tool_call(name, args, state.task_desc, model=state.model)
+        decisions[tc["id"]] = {
+            "verdict": verdict["risk"], "reason": verdict["reason"],
+            "tool": name, "args": args,
+        }
+        if verdict["risk"] == RISK_BLOCKED:
+            blocked_reason = verdict["reason"]
+        elif verdict["risk"] == RISK_CONFIRM:
+            needs_confirm = True
+
+    if blocked_reason:
+        # 任一 BLOCK → 本轮全部拦截（保守策略：拒绝执行本轮任何工具调用）
+        tool_messages = []
+        for tc in last_assistant["tool_calls"]:
+            tool_messages.append({
+                "role": "tool",
+                "tool_call_id": tc["id"],
+                "content": json.dumps({
+                    "success": False,
+                    "error": f"安全审查拦截：{blocked_reason}。请调整方案后重试，"
+                             f"不要尝试执行被拦截的操作。",
+                }, ensure_ascii=False),
+            })
+        logger.warning("review_node 拦截本轮工具调用 | 工具数={} 原因={}",
+                       len(last_assistant["tool_calls"]), blocked_reason)
+        return {"security_outcome": "block", "security_decisions": decisions,
+                "messages": tool_messages}
+
+    if needs_confirm:
+        logger.info("review_node 判定需人工确认 | 工具数={}", len(last_assistant["tool_calls"]))
+        return {"security_outcome": "confirm", "security_decisions": decisions}
+
+    return {"security_outcome": "allow", "security_decisions": decisions}
+
+
+def confirm_node(state: AgentState) -> Dict[str, Any]:
+    """人工确认节点（第四层）：中高风险操作挂起，等用户批准后才继续执行。
+
+    基于 LangGraph interrupt 实现 human-in-the-loop：
+    - 首次执行：interrupt(待确认信息) 抛出中断，图挂起，orchestrator 检测
+      __interrupt__ 后经 SSE 推送 confirmation_required 事件给前端
+    - 用户响应后：API 层以 Command(resume=批准与否) 恢复同一线程，本节点
+      重跑，interrupt() 直接返回用户决定
+
+    本节点不调用 LLM：待确认信息从 state.security_decisions 读取（review_node
+    已写入 checkpoint），恢复重跑无副作用、无重复调用，也不会二次判定。
+    """
+    pending = [
+        {"tool": d["tool"], "args": d.get("args", {}), "reason": d["reason"]}
+        for d in state.security_decisions.values()
+        if d.get("verdict") == RISK_CONFIRM
+    ]
+    if not pending:
+        # 兜底：无待确认项（如 confirm 后又被阻断的异常序列），按拒绝处理回 react
+        logger.warning("confirm_node 无待确认项，按拒绝处理")
+        return {"security_confirmation": False}
+
+    approved = interrupt({"pending_tools": pending})
+    if approved:
+        logger.info("confirm_node 用户批准执行 | 工具数={}", len(pending))
+        return {"security_confirmation": True}
+
+    # 用户拒绝：为每个待确认的工具调用回填拒绝消息，LLM 收到后自行改道
+    logger.info("confirm_node 用户拒绝执行 | 工具数={}", len(pending))
+    tool_messages = []
+    for tc_id, decision in state.security_decisions.items():
+        if decision.get("verdict") != RISK_CONFIRM:
+            continue
+        tool_messages.append({
+            "role": "tool",
+            "tool_call_id": tc_id,
+            "content": json.dumps({
+                "success": False,
+                "error": "用户拒绝了该操作。请换一种不涉及该操作的方案完成任务。",
+            }, ensure_ascii=False),
+        })
+    return {"security_confirmation": False, "messages": tool_messages}
+
+
+# 代码指纹前缀展示长度：确认弹窗里给用户看的代码预览（全文可能很长）
+_CODE_PREVIEW_CHARS = 400
+
+
+def _code_fingerprint(code: str) -> str:
+    """计算代码内容指纹（sha256）：用于"已审查/已批准代码"的跳过判断。"""
+    return hashlib.sha256(code.encode("utf-8")).hexdigest()
+
+
+async def code_review_node(state: AgentState) -> Dict[str, Any]:
+    """代码安全审查节点：代码主链路进入测试执行前的强制审查关卡。
+
+    背景：react_node / refine_node 产出的 current_code 会在 test_node 被
+    真实执行（pytest / 冒烟 subprocess），原先该链路不经过任何安全审查——
+    LLM 生成的网络外联代码会被静默执行。本节点补上这一缺口。
+
+    审查策略（与工具审查链路 review_node 对齐的三级结论）：
+    - allow：无危险模式且风险分类为 safe → 放行进入测试链路，并记录代码指纹
+    - block：命中拦截级模式（命令执行/动态执行）或风险分类为 blocked →
+      清空 current_code 并回填拦截反馈消息，LLM 换方案重新生成
+    - confirm：命中确认级模式（网络外联）或风险分类为 confirm →
+      挂起等人工确认（用户可能确实要求代码发起网络请求）
+    - 指纹跳过：内容与已审查通过的代码一致（测试失败回环 refine 未改代码）→
+      直接放行，避免同一份已批准代码反复弹窗
+    """
+    code = state.current_code
+    if not code.strip():
+        # 无代码：保持原链路行为，test_gen_node → finalize 兜底交付失败说明
+        return {"security_outcome": "allow", "security_decisions": {}}
+
+    # 同内容代码已通过审查（含人工批准）：跳过，防测试回环重复弹窗
+    if state.reviewed_code_hash and _code_fingerprint(code) == state.reviewed_code_hash:
+        logger.info("code_review_node 指纹匹配跳过审查 | 代码长度={}", len(code))
+        return {"security_outcome": "allow", "security_decisions": {}}
+
+    if not SECURITY_ENABLED:
+        return {"security_outcome": "allow", "security_decisions": {}}
+
+    # 第一层·拦截级：命令执行 / 动态执行，直接拦截并回填反馈让 LLM 换方案
+    block_reason = check_code_patterns(code)
+    if not block_reason:
+        # 第一层·确认级：网络外联，挂起等人工确认（不静默拦截）
+        confirm_reason = check_code_confirm_patterns(code)
+        if confirm_reason:
+            logger.info("code_review_node 确认级命中 | 代码长度={}", len(code))
+            return {
+                "security_outcome": "confirm",
+                "security_decisions": {
+                    "code": {
+                        "verdict": RISK_CONFIRM,
+                        "reason": confirm_reason,
+                        "tool": "代码执行",
+                        "args": {"code": code[:_CODE_PREVIEW_CHARS]},
+                    }
+                },
+            }
+        # 第三层：AI 风险分类（语义层兜底，拦规则拦不住的数据外泄等意图）
+        verdict = await classify_tool_call(
+            "code_executor", {"code": code}, state.task_desc, model=state.model
+        )
+        if verdict["risk"] == RISK_BLOCKED:
+            block_reason = verdict["reason"]
+        elif verdict["risk"] == RISK_CONFIRM:
+            logger.info("code_review_node 风险分类需确认 | 理由={}", verdict["reason"])
+            return {
+                "security_outcome": "confirm",
+                "security_decisions": {
+                    "code": {
+                        "verdict": RISK_CONFIRM,
+                        "reason": verdict["reason"],
+                        "tool": "代码执行",
+                        "args": {"code": code[:_CODE_PREVIEW_CHARS]},
+                    }
+                },
+            }
+
+    if block_reason:
+        logger.warning("code_review_node 拦截 | 原因={}", block_reason)
+        return {
+            "security_outcome": "block",
+            "security_decisions": {},
+            # 清空被拦截代码并回填反馈消息，react_node 据此换方案重新生成
+            "current_code": "",
+            "messages": [{
+                "role": "user",
+                "content": (
+                    f"安全审查拦截：你上一轮生成的代码未通过安全审查（{block_reason}），"
+                    f"该代码已被丢弃。请重新生成不包含该模式的代码完成任务。"
+                ),
+            }],
+        }
+
+    # 审查通过：记录指纹（本会话内同内容代码不再重复审查）
+    return {
+        "security_outcome": "allow",
+        "security_decisions": {},
+        "reviewed_code_hash": _code_fingerprint(code),
+    }
+
+
+def code_confirm_node(state: AgentState) -> Dict[str, Any]:
+    """代码人工确认节点（第四层）：含网络外联等确认级模式的代码挂起等用户批准。
+
+    与 confirm_node（工具确认）同样的 interrupt 机制：
+    - 首次执行：interrupt({"pending_tools": [...]}) 挂起，orchestrator 检测
+      __interrupt__ 后经 SSE 推送 confirmation_required 事件，前端弹确认框
+    - 用户批准：记录代码指纹（测试回环不再重复弹窗）→ 进入测试链路
+    - 用户拒绝：清空 current_code 并回填拒绝反馈 → react_node 换方案
+    """
+    decision = state.security_decisions.get("code") or {}
+    if not decision:
+        # 兜底：无待确认代码（异常序列），按拒绝处理回 react 重新决策
+        logger.warning("code_confirm_node 无待确认代码，按拒绝处理")
+        return {
+            "security_confirmation": False,
+            "security_outcome": "block",
+            "current_code": "",
+            "messages": [{
+                "role": "user",
+                "content": "安全审查异常：待确认代码丢失，请重新生成代码。",
+            }],
+        }
+
+    approved = interrupt({"pending_tools": [{
+        "tool": decision.get("tool", "代码执行"),
+        "args": decision.get("args", {}),
+        "reason": decision.get("reason", ""),
+    }]})
+
+    if approved:
+        logger.info("code_confirm_node 用户批准执行代码 | 长度={}", len(state.current_code))
+        return {
+            "security_confirmation": True,
+            # 批准即记录指纹：测试失败回环（refine 未改代码）不再重复弹窗
+            "reviewed_code_hash": _code_fingerprint(state.current_code),
+        }
+
+    # 用户拒绝：丢弃该代码并回填反馈，LLM 换一种不涉及该模式的方案
+    logger.info("code_confirm_node 用户拒绝执行代码 | 长度={}", len(state.current_code))
+    return {
+        "security_confirmation": False,
+        "security_outcome": "block",
+        "current_code": "",
+        "messages": [{
+            "role": "user",
+            "content": (
+                f"用户拒绝了执行该代码（{decision.get('reason', '')}），代码已丢弃。"
+                f"请换一种不涉及该模式的方案完成任务。"
+            ),
+        }],
+    }
+
+
 def tool_node(state: AgentState) -> Dict[str, Any]:
-    """工具执行节点：执行最后一条 assistant 消息中的工具调用，结果作为 tool 消息追加。"""
+    """工具执行节点：执行最后一条 assistant 消息中的工具调用，结果作为 tool 消息追加。
+
+    仅在审查链路放行（allow）或人工确认（approved）后到达；
+    第二层工具自检（参数校验）在各工具 execute 内部完成。
+    """
     tool_messages = []
     for message in reversed(state.messages):
         if not message.get("tool_calls"):

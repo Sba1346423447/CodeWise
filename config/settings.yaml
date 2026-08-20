@@ -27,6 +27,40 @@ sandbox:
 # ===== 代码库感知配置（repo-map） =====
 repo_map:
   # 项目根目录：扫描该目录下的 .py 文件生成结构摘要；留空表示禁用
-  root: ""
+  root: "D:/databox/backend"
   # 摘要最大字符数：控制注入 token 预算
   max_chars: 2000
+
+# ===== 安全审查配置（四层审查链路） =====
+security:
+  # 总开关：关闭后工具调用直接执行（等价于审查链路加入前的行为）
+  enabled: true
+  # 第一层·规则过滤：拦截级危险代码模式（命令执行/动态执行，命中即拦截，
+  # 作用于 code_executor/test_runner 的 code 参数与代码主链路）
+  dangerous_code_patterns:
+    - "os.system"
+    - "os.popen"
+    - "subprocess."
+    - "shutil.rmtree"
+    - "eval("
+    - "exec("
+    - "__import__("
+  # 第一层·规则过滤：确认级代码模式（网络外联，可能有正当用途——如用户明确
+  # 要求发 HTTP 请求——命中后挂起等人工确认，而非静默拦截）
+  confirm_code_patterns:
+    - "socket."
+    - "requests."
+    - "urllib."
+  # 第一层·规则过滤：敏感路径模式（作用于 file_editor 的 path 参数，防密钥/凭据文件读写）
+  sensitive_path_patterns:
+    - ".env"
+    - ".pem"
+    - ".key"
+    - "id_rsa"
+    - "secret"
+    - "credential"
+    - "token"
+  # 第三层·AI 风险分类：LLM 判别 prompt 注入 / 数据外泄 / 破坏性意图
+  # LLM 调用失败时保守降级为"需人工确认"（宁可多问一次，不放行可疑操作）
+  risk_classifier:
+    enabled: true

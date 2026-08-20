@@ -153,7 +153,9 @@ export function SessionHistory({
                                 ? "bg-brand-500"
                                 : session.status === "failed"
                                   ? "bg-danger"
-                                  : "bg-gray-300 dark:bg-gray-600"
+                                  : session.status === "stopped"
+                                    ? "bg-amber-500" // 用户手动中断：橙色点区分于失败
+                                    : "bg-gray-300 dark:bg-gray-600"
                             }`}
                           />
                           {formatTime(session.created_at)}

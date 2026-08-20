@@ -1,14 +1,21 @@
 """编排器：协调 Graph / Tools / Memory / LLM 的调度中枢，管理完整 Agent 生命周期。
 
-依赖：llm.config（模型名）、memory.conversation（对话记忆）、graph.builder（Agent 图）、
+依赖：llm.config（模型名）、memory.conversation（上下文压缩）、graph.builder（Agent 图）、
 core.tools.*（内置工具集）。模块级单例 orchestrator 供 API 层与测试复用。
+
+human-in-the-loop：confirm_node 的 interrupt 挂起由本层检测并经 on_event 推送
+confirmation_required 事件；用户响应后由 aresume 以 Command(resume=...) 恢复
+同一线程（thread_id = run_id，一次请求对应一个图执行线程）。
 """
 
 import time
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+import uuid
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+
+from langgraph.types import Command
 
 from ..llm.config import config as llm_config
-from ..memory.conversation import ConversationMemory, compress_messages
+from ..memory.conversation import compress_messages
 from ..utils.logger import get_logger
 from .graph.builder import agent_graph
 from .graph.state import AgentState
@@ -26,11 +33,14 @@ EventCallback = Callable[[Dict[str, Any]], Awaitable[None]]
 
 
 class AgentOrchestrator:
-    """Agent 编排器：装配工具、管理会话记忆、驱动图执行并产出节点事件流。"""
+    """Agent 编排器：装配工具、驱动图执行并产出节点事件流。
+
+    多轮会话记忆不在此维护：历史消息由 API 层从数据库加载，
+    经 arun 的 history_messages 参数注入后由 compress_messages 压缩。
+    """
 
     def __init__(self) -> None:
         self._register_default_tools()
-        self.conversation = ConversationMemory()
 
     def _register_default_tools(self) -> None:
         """启动时一次性装配内置工具（幂等：已注册则跳过）。"""
@@ -45,13 +55,6 @@ class AgentOrchestrator:
                 ]
             )
 
-    def reset_session(self) -> None:
-        """清理会话级状态：对话历史（仅新建会话时调用）。
-
-        反思记忆已随 AgentState 流转（每个图实例独立），不再需要全局清理。
-        """
-        self.conversation.clear()
-
     async def arun(
         self,
         task_desc: str,
@@ -59,6 +62,7 @@ class AgentOrchestrator:
         history_messages: Optional[List[Dict[str, Any]]] = None,
         on_event: Optional[EventCallback] = None,
         model: Optional[str] = None,
+        run_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """异步执行完整 Agent 流程：逐节点推送事件，返回最终交付结果。
 
@@ -66,12 +70,16 @@ class AgentOrchestrator:
         - session_id：当前会话 ID；None 表示新建会话（前端首次请求不带）。
         - history_messages：该会话已持久化的历史对话（OpenAI messages 格式）。
           注入后作为上下文基础，实现"同会话内继续追问、代码演进记忆"。
-        - on_event：可选异步回调，接收 {"type": "node", "node", "update"} 事件，
-          供 API 层转为 SSE 流推送给前端。
+        - on_event：可选异步回调，接收 {"type": "node", "node", "update"} 与
+          {"type": "confirmation_required", ...} 事件，供 API 层转为 SSE 推送。
         - model：本次请求选择的模型名（可选）；为空时使用后端默认配置。
+        - run_id：本次图执行线程 ID（checkpointer thread_id）；为空自动生成。
+          中途 interrupt 挂起后，前端凭 confirmation_required 事件中的 run_id
+          发起确认请求，由 aresume 恢复同一线程。
         """
         logger.info("Agent 任务开始 | 会话={} 任务={}", session_id, task_desc[:100])
         start = time.monotonic()
+        thread_id = run_id or uuid.uuid4().hex
 
         # 组装上下文：历史消息 + 本轮用户消息。
         # 长会话用滚动摘要压缩（compress_messages）替代机械截断，
@@ -91,16 +99,125 @@ class AgentOrchestrator:
             model=model or "",
         )
 
-        # 本轮行动摘要：按节点执行顺序收集，供前端折叠展示（贴近 Claude Code 叙事）
-        thinking: List[Dict[str, Any]] = []
+        final_state, thinking, pending = await self._stream_graph(
+            initial_state, thread_id, on_event
+        )
 
+        if pending:
+            # 安全审查挂起：图在 confirm_node interrupt 处暂停，本轮不产出交付物。
+            # 构造挂起结果（pending_confirmation 供前端弹确认框），会话状态
+            # 由 API 层置为 awaiting_confirmation，恢复后继续跑完。
+            result = {
+                "task_desc": task_desc,
+                "final_code": "",
+                "final_message": "安全审查检测到需要人工确认的操作，已推送确认请求。",
+                "messages": [],
+                "reflection_count": 0,
+                "tests_passed": False,
+                "test_results": {},
+                "model": model or llm_config.model,
+                "thinking": thinking,
+                "pending_confirmation": pending,
+            }
+            result["elapsed_ms"] = int((time.monotonic() - start) * 1000)
+            logger.info("Agent 任务挂起等待人工确认 | 会话={} run_id={}", session_id, thread_id)
+            return result
+
+        result = self._build_result(final_state)
+        result["thinking"] = thinking
+        result["pending_confirmation"] = None
+        # 消息元信息：耗时（毫秒），供前端消息底部展示（WorkBuddy 风格）；
+        # model 已由 _build_result 从 state 提取（用户选择的模型），不再取全局默认
+        result["elapsed_ms"] = int((time.monotonic() - start) * 1000)
+        logger.info(
+            "Agent 任务结束 | 会话={} 耗时={:.2f}s tests_passed={} 代码长度={} 摘要步数={}",
+            session_id,
+            time.monotonic() - start,
+            result["tests_passed"],
+            len(result["final_code"]),
+            len(thinking),
+        )
+        return result
+
+    async def aresume(
+        self,
+        run_id: str,
+        approved: bool,
+        on_event: Optional[EventCallback] = None,
+    ) -> Dict[str, Any]:
+        """恢复挂起的人工确认线程：用户批准/拒绝后继续执行图。
+
+        原理：confirm_node 在 interrupt 处重跑，interrupt() 直接返回 resume 值
+        （True 批准 / False 拒绝），图从断点继续走完（可能再次 interrupt——
+        同一线程多轮确认，此时返回新的挂起结果，前端继续弹框）。
+        """
+        logger.info("恢复人工确认线程 | run_id={} 批准={}", run_id, approved)
+        start = time.monotonic()
+
+        final_state, thinking, pending = await self._stream_graph(
+            Command(resume=approved), run_id, on_event
+        )
+
+        if pending:
+            result = {
+                "task_desc": "",
+                "final_code": "",
+                "final_message": "还有操作需要人工确认，已再次推送确认请求。",
+                "messages": [],
+                "reflection_count": 0,
+                "tests_passed": False,
+                "test_results": {},
+                "model": llm_config.model,
+                "thinking": thinking,
+                "pending_confirmation": pending,
+            }
+            result["elapsed_ms"] = int((time.monotonic() - start) * 1000)
+            return result
+
+        result = self._build_result(final_state)
+        result["thinking"] = thinking
+        result["pending_confirmation"] = None
+        result["elapsed_ms"] = int((time.monotonic() - start) * 1000)
+        logger.info("人工确认线程恢复执行完成 | run_id={} tests_passed={}", run_id, result["tests_passed"])
+        return result
+
+    async def _stream_graph(
+        self,
+        graph_input: Any,
+        thread_id: str,
+        on_event: Optional[EventCallback],
+    ) -> Tuple[Optional[AgentState], List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """驱动图执行并消费双流（arun / aresume 共用）。
+
+        - updates 流：逐节点事件经 on_event 推送 + 提炼行动摘要（thinking）；
+          其中 __interrupt__ 条目表示 confirm_node 挂起，提炼为确认请求事件
+        - values 流：捕获最终完整状态
+        返回 (final_state, thinking, pending_confirmation)。
+        """
+        thinking: List[Dict[str, Any]] = []
         final_state: Optional[AgentState] = None
-        # 双流模式：updates 产出节点事件，values 产出最终完整状态
+        pending_confirmation: Optional[Dict[str, Any]] = None
+        config = {"configurable": {"thread_id": thread_id}}
+
         async for mode, data in agent_graph.astream(
-            initial_state, stream_mode=["updates", "values"]
+            graph_input, config, stream_mode=["updates", "values"]
         ):
             if mode == "updates":
                 for node_name, update in data.items():
+                    if node_name == "__interrupt__":
+                        # confirm_node 挂起：提炼待确认信息，推送确认请求事件
+                        interrupts = update if isinstance(update, tuple) else (update,)
+                        for intr in interrupts:
+                            value = getattr(intr, "value", None) or {}
+                            tools = value.get("pending_tools") or []
+                            if not tools:
+                                continue
+                            pending_confirmation = {"run_id": thread_id, "tools": tools}
+                            if on_event:
+                                await on_event(
+                                    {"type": "confirmation_required", **pending_confirmation}
+                                )
+                        continue
                     if on_event:
                         await on_event(
                             {"type": "node", "node": node_name, "update": update}
@@ -111,20 +228,7 @@ class AgentOrchestrator:
             else:
                 final_state = data
 
-        result = self._build_result(final_state)
-        result["thinking"] = thinking
-        # 消息元信息：耗时（毫秒）与模型名，供前端消息底部展示（WorkBuddy 风格）
-        result["elapsed_ms"] = int((time.monotonic() - start) * 1000)
-        result["model"] = llm_config.model
-        logger.info(
-            "Agent 任务结束 | 会话={} 耗时={:.2f}s tests_passed={} 代码长度={} 摘要步数={}",
-            session_id,
-            time.monotonic() - start,
-            result["tests_passed"],
-            len(result["final_code"]),
-            len(thinking),
-        )
-        return result
+        return final_state, thinking, pending_confirmation
 
     @staticmethod
     def _summarize_node(node_name: str, update: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -145,6 +249,34 @@ class AgentOrchestrator:
                 ]
                 return {"type": "tool", "label": "调用工具", "detail": "、".join(names)}
             return {"type": "react", "label": "分析需求", "detail": (last.get("content") or "")[:80]}
+        if node_name == "review_node":
+            # 安全审查：规则过滤 + AI 风险分类的三级结论
+            outcome = update.get("security_outcome") or ""
+            label = {
+                "allow": "安全审查通过",
+                "block": "安全审查拦截",
+                "confirm": "安全审查待确认",
+            }.get(outcome, "安全审查")
+            return {"type": "tool", "label": "安全审查", "detail": label}
+        if node_name == "confirm_node":
+            # 人工确认结果（恢复轮产出；挂起轮只发 confirmation_required 事件）
+            confirmed = update.get("security_confirmation")
+            detail = "用户批准执行" if confirmed else "用户拒绝执行"
+            return {"type": "tool", "label": "人工确认", "detail": detail}
+        if node_name == "code_review_node":
+            # 代码安全审查：代码主链路进入测试执行前的三级结论
+            outcome = update.get("security_outcome") or ""
+            label = {
+                "allow": "代码安全审查通过",
+                "block": "代码安全审查拦截",
+                "confirm": "代码安全审查待确认",
+            }.get(outcome, "代码安全审查")
+            return {"type": "tool", "label": "代码安全审查", "detail": label}
+        if node_name == "code_confirm_node":
+            # 代码人工确认结果（恢复轮产出；挂起轮只发 confirmation_required 事件）
+            confirmed = update.get("security_confirmation")
+            detail = "用户批准执行代码" if confirmed else "用户拒绝执行代码"
+            return {"type": "tool", "label": "代码确认", "detail": detail}
         if node_name == "tool_node":
             return {"type": "tool", "label": "执行工具", "detail": "读取工具执行结果"}
         if node_name == "test_gen_node":
@@ -212,6 +344,9 @@ class AgentOrchestrator:
                 "reflection_count": state.get("reflection_count", 0),
                 "tests_passed": state.get("tests_passed", False),
                 "test_results": state.get("test_results", {}),
+                # 实际使用的模型：优先取用户本轮选择的 model（state 流转），
+                # 空串/缺失表示未指定，回退全局默认配置（与 client._build_kwargs 语义一致）
+                "model": state.get("model") or llm_config.model,
             }
 
         # 兜底：Pydantic 实例走属性访问
@@ -223,6 +358,7 @@ class AgentOrchestrator:
             "reflection_count": state.reflection_count,
             "tests_passed": state.tests_passed,
             "test_results": state.test_results,
+            "model": state.model or llm_config.model,
         }
 
 

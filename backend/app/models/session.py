@@ -12,6 +12,10 @@ from .database import get_connection
 STATUS_RUNNING = "running"
 STATUS_COMPLETED = "completed"
 STATUS_FAILED = "failed"
+# 用户手动停止：Agent 执行中途被前端"停止生成"按钮中断
+STATUS_STOPPED = "stopped"
+# 安全审查挂起：confirm_node interrupt 等待用户批准/拒绝（human-in-the-loop）
+STATUS_AWAITING = "awaiting_confirmation"
 
 
 async def create_session(task_desc: str) -> Dict:
