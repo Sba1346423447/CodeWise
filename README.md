@@ -6,15 +6,17 @@
 
 ## 核心特性
 
-- **Agent 自主工作流**：LangGraph 状态机编排「生成 → 验证 → 反思 → 优化 → 交付」完整闭环，LLM 自主决策每一步，无需人工介入
+- **Agent 自主工作流**：LangGraph 状态机编排「生成 → 审查 → 验证 → 反思 → 优化 → 交付」完整闭环，LLM 自主决策每一步，无需人工介入
 - **ReAct 循环**：Thought → Action → Observation 循环，LLM 判断产出代码还是调用工具，观察结果驱动下一步决策
+- **四层安全审查链路**：规则过滤（危险代码/敏感路径）→ 工具自检（路径穿越防护）→ AI 风险分类（prompt 注入防御，失败保守降级需确认）→ 人工确认（LangGraph interrupt + SSE 弹窗 + Command 恢复），保证 Agent 在真实开发环境下可控
 - **Self-Reflection 四维批判**：从正确性 / 性能 / 可读性 / 类型安全四个维度审查代码，按意见重写后重新验证，形成自纠正闭环
 - **客观验证闭环**：验证结果由真实运行退出码决定，不依赖 LLM 自评；附历史最优快照回退、冒烟测试兜底、循环次数护栏
 - **Tool-Augmented 工具扩展**：隔离沙箱代码执行、自动化验证、静态检查、联网检索、文件编辑，五类工具可插拔扩展
 - **代码库感知（repo-map）**：扫描项目结构生成类/函数摘要注入 LLM，让 Agent 基于已有代码库工作（对标 Aider 核心设计）
 - **三层记忆架构**：会话内对话记忆（多轮演进）、单任务反思记录、跨会话长期经验库（ChromaDB 向量检索复用）
 - **SSE 流式输出**：正文逐字 + 代码逐行打字机效果，思考过程实时可视化
-- **Web 前端**：React + TypeScript 单页应用，支持会话管理、Markdown 渲染、思考过程折叠展示、深色主题
+- **停止生成**：执行中可随时手动中止，真正终止图执行与 LLM 调用（asyncio Task 取消），避免空耗 token；会话记录 stopped 状态可回放
+- **Web 前端**：React + TypeScript 单页应用，支持会话管理、Markdown 渲染、思考过程折叠展示、深色主题、安全审查人工确认弹窗
 - **Docker 部署**：四服务（backend + frontend + chromadb + nginx）一键容器化启动
 
 ---
@@ -48,7 +50,8 @@ databox/
 │   │   │   ├── orchestrator.py # 编排器：协调 Graph / Tools / Memory / LLM
 │   │   │   ├── repo_map.py     # 代码库感知：AST 扫描生成项目结构摘要
 │   │   │   ├── graph/          # 图编排：state / nodes / edges / builder
-│   │   │   ├── prompts/        # ReAct / Reflection / Refine 提示词
+│   │   │   ├── prompts/        # ReAct / Reflection / Refine / 风险分类 提示词
+│   │   │   ├── security/       # L1 规则过滤 + L3 AI 风险分类
 │   │   │   └── tools/          # 代码执行 / 验证 / 静态检查 / 联网检索 / 文件编辑
 │   │   ├── llm/                # OpenAI 兼容客户端封装
 │   │   ├── memory/             # 对话记忆 / 反思记忆 / 经验库
@@ -190,9 +193,22 @@ docker compose down            # 停止并移除容器（保留卷数据）
 用户需求
    │
    ▼
-┌─ react_node ──工具调用──► tool_node ──►（ReAct 循环）
+┌─ react_node ──有工具调用──► review_node（L1规则+L3AI风险）
+│        │                      │confirm
+│        │                      ▼
+│        │                  confirm_node（interrupt弹窗等用户批准）
+│        │                      │ 批准→tool_node / 拒绝→react_node
 │        │
-│        产出代码
+│        │ 有工具审查通过
+│        └──────────► tool_node ──►（ReAct 循环）
+│
+│  产出代码
+│        ▼
+│   code_review_node（拦截级丢弃代码/确认级挂起/放行记指纹）
+│        │confirm
+│        ▼
+│   code_confirm_node（interrupt弹窗等用户批准）
+│        │ 批准→进入测试链路 / 拒绝→react_node换方案
 │        ▼
 │   test_gen_node（生成验证用例，复用/按需重生成）
 │        ▼
@@ -200,7 +216,7 @@ docker compose down            # 停止并移除容器（保留卷数据）
 │        ▼
 │   reflect_node（四维批判：正确性 / 性能 / 可读性 / 类型安全）
 │        ▼
-│   refine_node（按意见重写，改坏则回退最优快照）
+│   refine_node（按意见重写，改坏则回退最优快照）→ code_review_node（重写后重新审查）
 │        ▼
 └─ finalize_node（交付：总结 + 最终代码 + 结论）
 ```
@@ -210,12 +226,14 @@ docker compose down            # 停止并移除容器（保留卷数据）
 ## 项目亮点
 
 - **自纠正闭环**：不是「AI 能写代码」，而是「AI 写完代码后能自己验证、自己修好」——验证结果由真实运行退出码决定，杜绝「AI 自评自夸」
+- **多层安全审查链路**：构建规则过滤（L1）、工具自检（L2，路径穿越+敏感文件防护）、AI 风险分类（L3，prompt 注入防御+保守降级）与人工确认（L4，LangGraph interrupt）的四层审查架构，危险代码模式拆 block/confirm 两级——网络外联触发人工弹窗而非静默拦截，代码主链路（test_node 真实执行前）也强制过审查
 - **代码库感知**：repo-map 扫描项目结构注入 LLM，Agent 能基于已有代码库工作，而非生成孤立代码（对标 Aider）
 - **文件编辑能力**：内置 file_editor 工具，Agent 可真实读写项目文件，修改落地后仍走自纠闭环验证
 - **图编排架构**：LangGraph StateGraph 显式建模节点与条件路由，状态流转清晰可追踪，并发安全
 - **三层记忆体系**：会话内对话记忆、单任务反思记录、跨会话向量经验库，越用越聪明
-- **配置与代码解耦**：提示词模板 / 模型参数统一 YAML 管理，非代码人员可调优
+- **配置与代码解耦**：提示词模板 / 模型参数 / 安全规则统一 YAML 管理，非代码人员可调优
 - **客观验证闭环**：历史最优快照回退、冒烟测试兜底、循环次数护栏，保证收敛不失控
+- **可中止执行（停止生成）**：任务注册表按 run_id 跟踪执行 Task，cancel 真正终止图执行与 LLM 调用（CancelledError 注入）；stopped 会话独立状态可回放
 - **全栈工程化**：前后端接口契约严格对齐、Docker 四服务编排、Makefile 快捷命令、结构化日志
 
 ---
