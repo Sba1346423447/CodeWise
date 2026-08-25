@@ -3,7 +3,6 @@
 依赖：fastapi（路由）、models.*（会话 / 步骤 / 消息数据访问层）。
 """
 
-from typing import List
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -22,7 +21,7 @@ class CreateSessionRequest(BaseModel):
 
 
 @router.get("/")
-async def list_sessions() -> List[dict]:
+async def list_sessions() -> list[dict]:
     """列出全部历史会话（按创建时间倒序，供左侧会话栏渲染）。"""
     return await session_model.list_sessions()
 

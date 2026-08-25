@@ -15,7 +15,10 @@ chromadb>=1.5.0,<2.0
 pydantic>=2.13.0,<3.0
 
 # ===== 数据库 =====
-aiosqlite>=0.20.0,<1.0
+# 异步 MySQL 驱动（附带 PyMySQL 同步驱动，供 Alembic 迁移使用）
+aiomysql>=0.2.0,<1.0
+# schema 迁移管理
+alembic>=1.13.0,<2.0
 
 # ===== 工具库 =====
 loguru>=0.7.0,<1.0
@@ -25,4 +28,8 @@ pyyaml>=6.0.0,<7.0
 # ===== 测试 =====
 pytest>=8.0,<9.0
 pytest-asyncio>=0.24.0,<1.0
+pytest-cov>=7.0,<8.0
 httpx>=0.28.0,<1.0
+
+# ===== 代码质量（lint / 格式检查） =====
+ruff>=0.14.0,<1.0

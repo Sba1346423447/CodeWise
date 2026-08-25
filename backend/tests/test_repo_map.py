@@ -48,7 +48,7 @@ class TestBuildRepoMap:
 
     def test_超长截断(self, tmp_path):
         # 生成大量符号使摘要超过 max_chars，应截断并带提示
-        lines = ["def func_%d(a: int) -> int:\n    return a" % i for i in range(200)]
+        lines = [f"def func_{i}(a: int) -> int:\n    return a" for i in range(200)]
         (tmp_path / "big.py").write_text("\n\n".join(lines), encoding="utf-8")
         out = build_repo_map(str(tmp_path), max_chars=200)
         assert out.endswith("... (截断)")

@@ -7,7 +7,6 @@
 """
 
 from pathlib import Path
-from typing import List
 
 import yaml
 
@@ -23,7 +22,7 @@ def _load_templates() -> dict:
     return raw.get("react", {})
 
 
-def tools_to_text(tools_schemas: List[dict]) -> str:
+def tools_to_text(tools_schemas: list[dict]) -> str:
     """将 OpenAI Function Calling schema 列表转为人类可读的工具描述文本。"""
     lines = []
     for schema in tools_schemas:
@@ -36,7 +35,7 @@ def tools_to_text(tools_schemas: List[dict]) -> str:
 
 def build_react_system_prompt(
     tools_desc: str,
-    experiences: List[str],
+    experiences: list[str],
     iteration: int = 0,
     repo_map: str = "",
 ) -> str:

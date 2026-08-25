@@ -5,7 +5,6 @@
 超限时的摘要压缩（LLM 不可用时降级为硬截断）。
 """
 
-from typing import Dict, List
 
 from ..llm.client import client
 from ..utils.logger import get_logger
@@ -24,8 +23,8 @@ _COMPRESS_PROMPT = (
 
 
 async def compress_messages(
-    messages: List[Dict[str, str]], model: str = ""
-) -> List[Dict[str, str]]:
+    messages: list[dict[str, str]], model: str = ""
+) -> list[dict[str, str]]:
     """长会话滚动摘要压缩：消息数超过上限时，把最早部分压成摘要替代直接删除。
 
     摘要以 system 消息置于上下文开头，保留早期语义（需求演进 / 已定决策），

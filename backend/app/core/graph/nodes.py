@@ -21,12 +21,13 @@ import json
 import re
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import yaml
 from langgraph.types import interrupt
 
 from ...llm.client import client
+from ...llm.config import config as llm_config
 from ...memory.experience_store import ExperienceStore
 from ...utils.logger import get_logger
 from ..prompts.react import build_react_system_prompt, tools_to_text
@@ -50,6 +51,9 @@ from ..tools.test_runner import TestRunner
 from .state import AgentState
 
 logger = get_logger("graph.nodes")
+
+# 轻量模型名（受控输出角色专用）：未配置时为 None，回落主模型（行为兼容）
+FAST_MODEL = llm_config.fast_model or None
 
 # 长期经验库（跨会话复用）：HttpClient 连接独立 ChromaDB，无全局可变状态，
 # 各图实例安全共享；反思记录则随 AgentState 流转（并发安全，见 reflect/refine 节点）
@@ -145,7 +149,7 @@ def _extract_code_from_tool_arguments(arguments: str) -> str:
 
     返回合法 Python 代码或空串；无论哪条路径都经 ast.parse 校验。
     """
-    candidates: List[str] = []
+    candidates: list[str] = []
     try:
         args = json.loads(arguments or "{}")
         candidates.append(args.get("code", ""))
@@ -169,7 +173,7 @@ def _extract_code_from_tool_arguments(arguments: str) -> str:
     return ""
 
 
-def _has_tool_call(message: Dict[str, Any], tool_name: str) -> bool:
+def _has_tool_call(message: dict[str, Any], tool_name: str) -> bool:
     """判断某条消息是否调用了指定名称的工具（兼容 dict / Pydantic 结构）。"""
     for tc in message.get("tool_calls") or []:
         fn = tc.get("function") if isinstance(tc, dict) else tc.function
@@ -181,7 +185,7 @@ def _has_tool_call(message: Dict[str, Any], tool_name: str) -> bool:
     return False
 
 
-async def react_node(state: AgentState) -> Dict[str, Any]:
+async def react_node(state: AgentState) -> dict[str, Any]:
     """ReAct 循环节点：LLM 决策产出 Thought/Action，带交付压力。
 
     交付压力设计：
@@ -209,7 +213,7 @@ async def react_node(state: AgentState) -> Dict[str, Any]:
     # 容错调用：LLM 失败/超时返回 None，不中断任务，交付明确失败说明（不伪造成功）。
     # 需先 return update，否则后续访问 response.choices[0] 会空引用报错。
     if response is None:
-        update: Dict[str, Any] = {
+        update: dict[str, Any] = {
             "messages": [],
             # 迭代计数自增，供 edges.py 判断 ReAct 是否超限
             "react_iterations": state.react_iterations + 1,
@@ -224,11 +228,11 @@ async def react_node(state: AgentState) -> Dict[str, Any]:
 
     assistant = response.choices[0].message
     finish_reason = response.choices[0].finish_reason or ""
-    message: Dict[str, Any] = {"role": "assistant", "content": assistant.content or ""}
+    message: dict[str, Any] = {"role": "assistant", "content": assistant.content or ""}
     if assistant.tool_calls:
         message["tool_calls"] = [tc.model_dump() for tc in assistant.tool_calls]
 
-    update: Dict[str, Any] = {
+    update: dict[str, Any] = {
         "messages": [message],
         # 迭代计数自增，供 edges.py 判断 ReAct 是否超限
         "react_iterations": state.react_iterations + 1,
@@ -274,7 +278,7 @@ async def react_node(state: AgentState) -> Dict[str, Any]:
     return update
 
 
-async def review_node(state: AgentState) -> Dict[str, Any]:
+async def review_node(state: AgentState) -> dict[str, Any]:
     """安全审查节点（第一层规则过滤 + 第三层 AI 风险分类）。
 
     审查最后一条 assistant 消息中的全部工具调用，产出三级结论：
@@ -303,7 +307,7 @@ async def review_node(state: AgentState) -> Dict[str, Any]:
     if not SECURITY_ENABLED:
         return {"security_outcome": "allow", "security_decisions": {}}
 
-    decisions: Dict[str, Any] = {}
+    decisions: dict[str, Any] = {}
     blocked_reason = ""
     needs_confirm = False
     for tc in last_assistant["tool_calls"]:
@@ -365,7 +369,7 @@ async def review_node(state: AgentState) -> Dict[str, Any]:
     return {"security_outcome": "allow", "security_decisions": decisions}
 
 
-def confirm_node(state: AgentState) -> Dict[str, Any]:
+def confirm_node(state: AgentState) -> dict[str, Any]:
     """人工确认节点（第四层）：中高风险操作挂起，等用户批准后才继续执行。
 
     基于 LangGraph interrupt 实现 human-in-the-loop：
@@ -418,7 +422,7 @@ def _code_fingerprint(code: str) -> str:
     return hashlib.sha256(code.encode("utf-8")).hexdigest()
 
 
-async def code_review_node(state: AgentState) -> Dict[str, Any]:
+async def code_review_node(state: AgentState) -> dict[str, Any]:
     """代码安全审查节点：代码主链路进入测试执行前的强制审查关卡。
 
     背景：react_node / refine_node 产出的 current_code 会在 test_node 被
@@ -509,7 +513,7 @@ async def code_review_node(state: AgentState) -> Dict[str, Any]:
     }
 
 
-def code_confirm_node(state: AgentState) -> Dict[str, Any]:
+def code_confirm_node(state: AgentState) -> dict[str, Any]:
     """代码人工确认节点（第四层）：含网络外联等确认级模式的代码挂起等用户批准。
 
     与 confirm_node（工具确认）同样的 interrupt 机制：
@@ -562,7 +566,7 @@ def code_confirm_node(state: AgentState) -> Dict[str, Any]:
     }
 
 
-def tool_node(state: AgentState) -> Dict[str, Any]:
+def tool_node(state: AgentState) -> dict[str, Any]:
     """工具执行节点：执行最后一条 assistant 消息中的工具调用，结果作为 tool 消息追加。
 
     仅在审查链路放行（allow）或人工确认（approved）后到达；
@@ -598,20 +602,26 @@ def tool_node(state: AgentState) -> Dict[str, Any]:
     return {"messages": tool_messages}
 
 
-async def _generate_test_code(code: str, model: str = "") -> str:
+async def _generate_test_code(code: str, model: str = "", failure_hint: str = "") -> str:
     """让 LLM 为当前代码生成 pytest 测试（独立生成一次，避免每次循环重复生成）。
 
+    failure_hint 非空时为"测试自身崩溃后的重生成"：注入上次崩溃原因，
+    要求 LLM 修正测试自身的问题（import 错误符号 / mock 缺失等）。
     容错调用：LLM 超时/失败返回空串，由 test_gen_node 重试或冒烟测试兜底。
     """
     prompt = _load_test_templates().get("generate", "").format(code=code)
+    if failure_hint:
+        regen_hint = _load_test_templates().get("regen_hint", "").format(
+            failure_hint=failure_hint, code=code)
+        prompt = regen_hint
     response = await client.chat_or_none(
         messages=[{"role": "system", "content": prompt}],
-        model=model or None,
+        model=FAST_MODEL or model or None,
     )
     return extract_code(response.choices[0].message.content or "") if response else ""
 
 
-async def test_gen_node(state: AgentState) -> Dict[str, Any]:
+async def test_gen_node(state: AgentState) -> dict[str, Any]:
     """测试生成节点：为当前代码生成 pytest 测试代码，存入 state.test_code 复用。
 
     与旧实现的区别：旧 test_node 每次进入都重新用 LLM 生成测试，
@@ -623,10 +633,29 @@ async def test_gen_node(state: AgentState) -> Dict[str, Any]:
         logger.warning("test_gen_node 跳过 | 无当前代码可测")
         return {"tests_passed": False}
 
-    # 已有测试代码且代码未变 → 直接复用（refine 后 current_code 变化会重新生成）
-    if state.test_code.strip():
+    # 已有测试代码且代码未变 → 直接复用（refine 后 current_code 变化会重新生成）；
+    # 测试自身崩溃（test_broken）除外：需带着失败原因重新生成测试
+    if state.test_code.strip() and not state.test_broken:
         logger.info("test_gen_node 复用已有测试代码")
         return {"test_code": state.test_code}
+
+    # 测试崩溃重生成：注入上次崩溃原因，帮助 LLM 修正测试自身的问题
+    if state.test_broken and state.test_regen_count < 1:
+        logger.info("test_gen_node 重生成 | 测试自身崩溃，注入失败详情")
+        test_code = await _generate_test_code(
+            code, model=state.model,
+            failure_hint=state.test_results.get("output", "")[:800],
+        )
+        if test_code.strip():
+            return {
+                "test_code": test_code,
+                "test_broken": False,
+                "test_regen_count": state.test_regen_count + 1,
+            }
+        # 重生成失败：退化为冒烟测试兜底，链路必然收敛
+        logger.warning("test_gen_node 重生成失败 | 退化为冒烟测试")
+        return {"test_code": "", "test_broken": False,
+                "test_regen_count": state.test_regen_count + 1}
 
     test_code = await _generate_test_code_retry(code, model=state.model)
     if not test_code.strip():
@@ -654,7 +683,7 @@ async def _generate_test_code_retry(code: str, model: str = "") -> str:
     return extract_code(response.choices[0].message.content or "") if response else ""
 
 
-async def test_node(state: AgentState) -> Dict[str, Any]:
+async def test_node(state: AgentState) -> dict[str, Any]:
     """强制测试验证节点：对当前代码执行真实 pytest，结果客观写入 tests_passed。
 
     测试代码来源：
@@ -684,8 +713,23 @@ async def test_node(state: AgentState) -> Dict[str, Any]:
                 result.get("failed", 0),
                 result.get("errors", 0))
 
-    update: Dict[str, Any] = {
+    # 测试自身崩溃分流（collection error）：一条用例都没执行（passed+failed==0
+    # 且 errors>0）说明测试文件在 import 阶段就崩了——问题在测试不在代码。
+    # 标记 test_broken 让路由回 test_gen_node 重生成测试（代码不动），
+    # 切断"坏测试 → 反思 → 改正确代码"的空转循环
+    test_broken = (
+        bool(test_code)
+        and not passed
+        and result.get("errors", 0) > 0
+        and result.get("passed", 0) + result.get("failed", 0) == 0
+    )
+    if test_broken:
+        logger.warning("test_node 测试自身崩溃 | 重生成测试（代码不动） 次数={}",
+                       state.test_regen_count)
+
+    update: dict[str, Any] = {
         "tests_passed": passed,
+        "test_broken": test_broken,
         "test_results": {
             "passed": result.get("passed", 0),
             "failed": result.get("failed", 0),
@@ -704,7 +748,7 @@ async def test_node(state: AgentState) -> Dict[str, Any]:
     return update
 
 
-def _smoke_test(code: str) -> Dict[str, Any]:
+def _smoke_test(code: str) -> dict[str, Any]:
     """增强冒烟测试：验证代码"可运行 + 基础行为"（无 pytest 依赖）。
 
     三层验证（比旧版只验证 import 更进一步）：
@@ -720,7 +764,7 @@ def _smoke_test(code: str) -> Dict[str, Any]:
     """
     import ast
     import subprocess
-    import sys
+    import sys  # noqa: E402  # 局部导入（仅本函数使用 sys.executable 运行子进程）
     import tempfile
 
     # 1. 语法预检：ast.parse 失败直接判失败（无需真实执行）
@@ -764,8 +808,7 @@ def _smoke_test(code: str) -> Dict[str, Any]:
     # 3. 基础行为探针：AST 提取类/函数，零参构造与调用，验证"对象能否建立"
     probe_lines = ["# === 冒烟测试行为探针 ==="]
     try:
-        mod = sys.modules.get("__main__")
-        exec_globals: Dict[str, Any] = {}
+        exec_globals: dict[str, Any] = {}
         exec(code, exec_globals)
         for node in tree.body:
             if isinstance(node, ast.ClassDef):
@@ -797,7 +840,7 @@ def _smoke_test(code: str) -> Dict[str, Any]:
     }
 
 
-async def reflect_node(state: AgentState) -> Dict[str, Any]:
+async def reflect_node(state: AgentState) -> dict[str, Any]:
     """批判反思节点：基于 用户需求 + 代码 + 测试失败详情 输出具体修复意见。
 
     与旧实现的区别：旧实现只传代码文本，LLM 看不到 pytest 失败原因，
@@ -814,7 +857,7 @@ async def reflect_node(state: AgentState) -> Dict[str, Any]:
     # 容错调用：LLM 超时/失败返回 None，不中断整个 Agent 流程
     response = await client.chat_or_none(
         messages=[{"role": "system", "content": prompt}],
-        model=state.model or None,
+        model=FAST_MODEL or state.model or None,
     )
     critique = (response.choices[0].message.content or "").strip() if response else ""
 
@@ -842,7 +885,7 @@ async def reflect_node(state: AgentState) -> Dict[str, Any]:
     }
 
 
-async def refine_node(state: AgentState) -> Dict[str, Any]:
+async def refine_node(state: AgentState) -> dict[str, Any]:
     """代码优化节点：按批判意见重写代码，更新反思记录并递增轮次。
 
     强制约束：
@@ -866,8 +909,10 @@ async def refine_node(state: AgentState) -> Dict[str, Any]:
             "current_code": new_code,
             "reflection_count": round_index,
             "critique": "",  # 消费后清空，防止重复优化
-            # 代码已变化，强制下次 test_gen_node 重新生成测试
-            "test_code": "",
+            # 测试保留复用：refine 已被约束"保持对外接口不变"，测试仍有效，
+            # 直接重跑 pytest 省一次测试生成调用；若测试因此崩溃，
+            # test_broken 分流会接管重生成
+            "test_code": state.test_code,
             # 反思记录随 state 流转（取代模块级单例，并发会话互不串味）；
             # previous_code 保留修改前代码，供前端 Diff 视图展示"本轮改了什么"
             "reflections": [
@@ -897,16 +942,20 @@ async def _build_final_summary(
     """
     prompt = (
         "你是 CodeWise 编程助手的交付总结器。根据用户需求、最终代码与验证结论，"
-        "用 2-4 句简洁自然的中文向用户说明：你完成了什么、代码如何实现核心点、验证结果如何。"
-        "不要输出代码块，不要使用 markdown 标题，直接输出总结文字。\n\n"
+        "用 2-4 句简洁自然的中文向用户说明：你完成了什么、代码如何实现核心点、验证结果如何。\n"
+        "产品化约束（必须遵守）：\n"
+        "- 面向终端用户，只讲结果与用法，不暴露任何内部机制（反思轮次、模型、"
+        "解析过程、测试生成方式等一律不提）\n"
+        "- 禁止输出调试建议、排查指引、\"建议再调试/检查格式\"类表述；"
+        "验证未通过时只客观说明哪些功能已实现、哪些场景未覆盖验证\n"
+        "- 不要输出代码块，不要使用 markdown 标题，直接输出总结文字\n\n"
         f"用户需求：{task_desc}\n"
         f"验证是否通过：{'通过' if tests_passed else '未通过'}\n"
-        f"优化轮次：{reflection_count}\n"
         f"最终代码：\n```python\n{final_code}\n```"
     )
     response = await client.chat_or_none(
         messages=[{"role": "system", "content": prompt}],
-        model=model or None,
+        model=FAST_MODEL or model or None,
     )
     summary = (response.choices[0].message.content or "").strip() if response else ""
     return summary
@@ -918,7 +967,7 @@ async def _build_final_summary(
 _ENV_ERROR_MARKERS = ("UnicodeEncodeError", "UnicodeDecodeError", "LookupError")
 
 
-def _is_env_error(test_results: Optional[Dict[str, Any]]) -> bool:
+def _is_env_error(test_results: dict[str, Any] | None) -> bool:
     """判断测试失败是否源于环境因素（编码类错误），而非代码逻辑问题。"""
     output = (test_results or {}).get("output") or ""
     return any(marker in output for marker in _ENV_ERROR_MARKERS)
@@ -935,7 +984,7 @@ def _persist_experience(task_desc: str, code: str, summary: str) -> None:
     experience_store.add_experience(task_desc=task_desc, code=code, summary=summary)
 
 
-async def finalize_node(state: AgentState) -> Dict[str, Any]:
+async def finalize_node(state: AgentState) -> dict[str, Any]:
     """最终交付节点：保证任何情况下 final_code 非空，交付文案自然语言化。
 
     逻辑（含回退机制）：
@@ -967,8 +1016,7 @@ async def finalize_node(state: AgentState) -> Dict[str, Any]:
     if not state.tests_passed and not env_error and best and state.best_tests_passed:
         logger.warning("finalize_node 回退 | 当前实现验证失败，回退到最优快照 长度={}", len(best))
         base_message = (
-            f"✗ 当前版本未通过验证，已回退到历史最优实现"
-            f"（已优化 {state.reflection_count} 轮）"
+            "已完成。当前版本在自动验证中未完全通过，已为你回退到验证通过的历史版本。"
         )
         summary = await _build_final_summary(
             state.task_desc, best, True, state.reflection_count, model=state.model
@@ -989,8 +1037,8 @@ async def finalize_node(state: AgentState) -> Dict[str, Any]:
         # test_results 清空使前端测试面板隐藏——环境细节不进入用户界面。
         passed = state.tests_passed or env_error
         base_message = (
-            "✓ 已完成" if passed
-            else f"✗ 仍需优化（已优化 {state.reflection_count} 轮），已交付当前实现"
+            "已完成，自动验证通过。" if passed
+            else "已完成。核心功能已实现，部分场景未覆盖自动验证，可按需调整。"
         )
         logger.info("finalize_node 完成 | 交付代码 长度={} tests_passed={} env_error={}",
                     len(code), passed, env_error)

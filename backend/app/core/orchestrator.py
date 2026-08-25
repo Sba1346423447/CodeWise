@@ -10,7 +10,8 @@ confirmation_required 事件；用户响应后由 aresume 以 Command(resume=...
 
 import time
 import uuid
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from langgraph.types import Command
 
@@ -29,7 +30,7 @@ from .tools.web_search import WebSearch
 logger = get_logger("core.orchestrator")
 
 # 异步事件回调签名：入参为节点事件字典
-EventCallback = Callable[[Dict[str, Any]], Awaitable[None]]
+EventCallback = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 class AgentOrchestrator:
@@ -58,12 +59,12 @@ class AgentOrchestrator:
     async def arun(
         self,
         task_desc: str,
-        session_id: Optional[str] = None,
-        history_messages: Optional[List[Dict[str, Any]]] = None,
-        on_event: Optional[EventCallback] = None,
-        model: Optional[str] = None,
-        run_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        session_id: str | None = None,
+        history_messages: list[dict[str, Any]] | None = None,
+        on_event: EventCallback | None = None,
+        model: str | None = None,
+        run_id: str | None = None,
+    ) -> dict[str, Any]:
         """异步执行完整 Agent 流程：逐节点推送事件，返回最终交付结果。
 
         多轮支持：
@@ -84,7 +85,7 @@ class AgentOrchestrator:
         # 组装上下文：历史消息 + 本轮用户消息。
         # 长会话用滚动摘要压缩（compress_messages）替代机械截断，
         # 保留早期语义（需求演进 / 已定决策），避免多轮对话丢信息。
-        context: List[Dict[str, str]] = []
+        context: list[dict[str, str]] = []
         for msg in history_messages or []:
             role = msg.get("role")
             content = msg.get("content")
@@ -143,8 +144,8 @@ class AgentOrchestrator:
         self,
         run_id: str,
         approved: bool,
-        on_event: Optional[EventCallback] = None,
-    ) -> Dict[str, Any]:
+        on_event: EventCallback | None = None,
+    ) -> dict[str, Any]:
         """恢复挂起的人工确认线程：用户批准/拒绝后继续执行图。
 
         原理：confirm_node 在 interrupt 处重跑，interrupt() 直接返回 resume 值
@@ -185,8 +186,8 @@ class AgentOrchestrator:
         self,
         graph_input: Any,
         thread_id: str,
-        on_event: Optional[EventCallback],
-    ) -> Tuple[Optional[AgentState], List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        on_event: EventCallback | None,
+    ) -> tuple[AgentState | None, list[dict[str, Any]], dict[str, Any] | None]:
         """驱动图执行并消费双流（arun / aresume 共用）。
 
         - updates 流：逐节点事件经 on_event 推送 + 提炼行动摘要（thinking）；
@@ -194,9 +195,9 @@ class AgentOrchestrator:
         - values 流：捕获最终完整状态
         返回 (final_state, thinking, pending_confirmation)。
         """
-        thinking: List[Dict[str, Any]] = []
-        final_state: Optional[AgentState] = None
-        pending_confirmation: Optional[Dict[str, Any]] = None
+        thinking: list[dict[str, Any]] = []
+        final_state: AgentState | None = None
+        pending_confirmation: dict[str, Any] | None = None
         config = {"configurable": {"thread_id": thread_id}}
 
         async for mode, data in agent_graph.astream(
@@ -231,7 +232,7 @@ class AgentOrchestrator:
         return final_state, thinking, pending_confirmation
 
     @staticmethod
-    def _summarize_node(node_name: str, update: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _summarize_node(node_name: str, update: dict[str, Any]) -> dict[str, Any] | None:
         """从单个节点 update 提炼一条"行动摘要"，供前端折叠展示；无有效信息返回 None。
 
         提炼原则：只保留用户可理解的行动与结论，不暴露原始 JSON 细节。
@@ -311,7 +312,7 @@ class AgentOrchestrator:
         return None
 
     @staticmethod
-    def _build_result(state: Optional[AgentState]) -> Dict[str, Any]:
+    def _build_result(state: AgentState | None) -> dict[str, Any]:
         """从最终状态组装对外交付结果（final_code 兜底取 current_code）。
 
         兼容 Pydantic AgentState 实例（dict 形式）：LangGraph 1.x 的 values 模式

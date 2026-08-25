@@ -3,7 +3,7 @@
 依赖：utils.sandbox.Sandbox（隔离执行）、.base.Tool（工具基类）。
 """
 
-from typing import Any, Dict
+from typing import Any
 
 from ...utils.sandbox import Sandbox
 from .base import Tool
@@ -18,7 +18,7 @@ class CodeExecutor(Tool):
     )
 
     @property
-    def parameters(self) -> Dict[str, Any]:
+    def parameters(self) -> dict[str, Any]:
         return {
             "type": "object",
             "properties": {
@@ -30,7 +30,7 @@ class CodeExecutor(Tool):
             "required": ["code"],
         }
 
-    def execute(self, **kwargs: Any) -> Dict[str, Any]:
+    def execute(self, **kwargs: Any) -> dict[str, Any]:
         """在隔离沙箱中执行代码；沙箱自动创建、限时执行并清理。"""
         code = kwargs.get("code", "")
         if not code.strip():

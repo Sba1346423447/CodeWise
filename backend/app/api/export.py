@@ -4,6 +4,7 @@
 """
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from ..models import session as session_model
@@ -27,7 +28,8 @@ async def export_session(
     steps = await step_model.get_steps_by_session(session_id)
 
     if output_format == "json":
-        return JSONResponse({"session": session, "steps": steps})
+        # MySQL 驱动返回 datetime 对象，经 jsonable_encoder 转 ISO 字符串（前端 new Date 可解析）
+        return JSONResponse(jsonable_encoder({"session": session, "steps": steps}))
 
     return PlainTextResponse(
         _to_markdown(session, steps), media_type="text/markdown"

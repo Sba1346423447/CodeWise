@@ -1,6 +1,5 @@
 """安全审查模块测试：第一层规则过滤（拦截级/确认级）+ 第三层 AI 风险分类（不触发真实 LLM）。"""
 
-import json
 
 import pytest
 

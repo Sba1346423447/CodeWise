@@ -1,0 +1,20 @@
+# pre-commit 钩子：提交前自动 lint（后端 ruff / 前端 eslint）
+# 安装：pip install pre-commit && pre-commit install
+# 手动全量：pre-commit run --all-files
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.1
+    hooks:
+      - id: ruff
+        args: [--fix]
+        files: ^backend/
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: end-of-file-fixer
+        exclude: \.md$
+      - id: trailing-whitespace
+        exclude: \.md$
+      - id: check-yaml
+      - id: check-added-large-files

@@ -19,10 +19,9 @@
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 import yaml
-from langgraph.graph import END
 
 from .state import AgentState
 
@@ -54,7 +53,7 @@ MAX_CONSECUTIVE_TOOL_FAILURES = 2
 _FALLBACK_CRITIQUE_PREFIX = "未通过：当前实现未通过"
 
 
-def _count_consecutive_tool_failures(messages: List[Dict[str, Any]], limit: int) -> int:
+def _count_consecutive_tool_failures(messages: list[dict[str, Any]], limit: int) -> int:
     """从消息末尾向前统计连续工具失败次数，达到 limit 即返回 limit。
 
     工具结果以 JSON 字符串写入 tool 消息的 content 字段（含 success 字段），
@@ -156,6 +155,20 @@ def route_after_code_confirm(state: AgentState) -> str:
     if state.security_confirmation:
         return "test_gen_node"
     return "react_node"
+
+
+def route_after_test(state: AgentState) -> str:
+    """test_node 之后路由（Codex 式"验证是安全网，不是收费站"）：
+    - 测试通过 → finalize_node 直接交付（跳过反思，省一次 LLM 调用）
+    - 测试自身崩溃（test_broken）且未超重生成上限 → test_gen_node 重生成测试
+      （代码不动，切断"坏测试 → 反思 → 改正确代码"空转）
+    - 否则 → reflect_node（真实失败进入反思循环）
+    """
+    if state.tests_passed:
+        return "finalize_node"
+    if state.test_broken and state.test_regen_count < 1:
+        return "test_gen_node"
+    return "reflect_node"
 
 
 def route_after_reflect(state: AgentState) -> str:

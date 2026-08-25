@@ -5,7 +5,7 @@
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict
+from typing import Any
 
 
 class Tool(ABC):
@@ -22,9 +22,9 @@ class Tool(ABC):
 
     @property
     @abstractmethod
-    def parameters(self) -> Dict[str, Any]:
+    def parameters(self) -> dict[str, Any]:
         """返回参数 JSON Schema（OpenAI Function Calling 兼容格式）。"""
 
     @abstractmethod
-    def execute(self, **kwargs: Any) -> Dict[str, Any]:
+    def execute(self, **kwargs: Any) -> dict[str, Any]:
         """执行工具逻辑，返回结构化结果 dict，供 Observation 展示与后续分析。"""

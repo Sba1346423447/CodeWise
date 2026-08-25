@@ -1,0 +1,32 @@
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = [".lint-tools"]
+
+[tool.ruff.lint]
+# 起步子集：错误检查 + import 排序 + pyupgrade，不做风格类强约束（未接 black 格式化）
+select = ["E4", "E7", "E9", "F", "I", "UP"]
+# E501 行宽不启用（注释含中文时长行常见，由 line-length 软约束）
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+source = ["app"]
+omit = [
+    "app/__init__.py",
+    # LLM 薄封装与提示词拼接：真实调用路径无法在单测验证（需 mock 整条链路），
+    # 归入 P2 mock-LLM E2E 覆盖，不计入门禁统计
+    "app/llm/client.py",
+    "app/core/prompts/*",
+]
+
+[tool.coverage.report]
+# 覆盖率门禁：低于阈值 CI 失败
+fail_under = 80
+show_missing = true

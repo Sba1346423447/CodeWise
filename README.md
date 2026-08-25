@@ -17,7 +17,7 @@
 - **SSE 流式输出**：正文逐字 + 代码逐行打字机效果，思考过程实时可视化
 - **停止生成**：执行中可随时手动中止，真正终止图执行与 LLM 调用（asyncio Task 取消），避免空耗 token；会话记录 stopped 状态可回放
 - **Web 前端**：React + TypeScript 单页应用，支持会话管理、Markdown 渲染、思考过程折叠展示、深色主题、安全审查人工确认弹窗
-- **Docker 部署**：四服务（backend + frontend + chromadb + nginx）一键容器化启动
+- **Docker 部署**：五服务（backend + frontend + mysql + chromadb + nginx）一键容器化启动
 
 ---
 
@@ -29,7 +29,7 @@
 | Agent 编排 | LangGraph 1.x（StateGraph 状态机） |
 | LLM | OpenAI 协议兼容（火山方舟 / 通义千问 / DeepSeek 等） |
 | 向量数据库 | ChromaDB（独立服务） |
-| 数据持久化 | SQLite（aiosqlite，会话 / 步骤 / 消息） |
+| 数据持久化 | MySQL 8.4（aiomysql，会话 / 步骤 / 消息；Alembic 迁移管理） |
 | Web API | FastAPI + Uvicorn + SSE |
 | 前端 | React 18 + TypeScript + Vite + Tailwind CSS |
 | 部署 | Docker / Docker Compose |
@@ -55,7 +55,7 @@ databox/
 │   │   │   └── tools/          # 代码执行 / 验证 / 静态检查 / 联网检索 / 文件编辑
 │   │   ├── llm/                # OpenAI 兼容客户端封装
 │   │   ├── memory/             # 对话记忆 / 反思记忆 / 经验库
-│   │   ├── models/             # SQLite 会话 / 步骤 / 消息模型
+│   │   ├── models/             # MySQL 会话 / 步骤 / 消息模型（Alembic 管理迁移）
 │   │   └── utils/              # 沙箱 / 日志 / SSE 工具
 │   ├── tests/                  # 后端测试套件
 │   ├── requirements.txt
@@ -70,7 +70,7 @@ databox/
 │   ├── package.json
 │   ├── nginx.conf              # 生产环境 Nginx 配置
 │   └── Dockerfile
-├── docker-compose.yml          # backend + frontend + chromadb + nginx
+├── docker-compose.yml          # backend + frontend + mysql + chromadb + nginx
 ├── Makefile                    # install / dev / test / build / up / down
 └── .env.example                # 根目录环境变量模板
 ```
@@ -149,13 +149,14 @@ docker compose up -d --build
 
 启动后访问 **http://localhost:8080**（nginx 网关，静态页面 + `/api` 反向代理 + SSE）。
 
-**四服务架构：**
+**五服务架构：**
 
 | 服务 | 镜像来源 | 对外端口 | 职责 |
 |------|----------|----------|------|
 | `nginx` | `nginx:1.27-alpine` | `8080` | 网关：静态页面 + `/api` 反向代理 + SSE 透传 |
 | `frontend` | Node 20 多阶段构建 | — | Vite 构建产物，由网关托管 |
 | `backend` | `python:3.12-slim` | — | FastAPI + LangGraph 核心逻辑 |
+| `mysql` | `mysql:8.4` | — | 会话 / 步骤 / 消息持久化 |
 | `chromadb` | `chromadb/chroma:latest` | `8001` | 长期经验库向量存储 |
 
 **常用运维命令：**
@@ -234,7 +235,7 @@ docker compose down            # 停止并移除容器（保留卷数据）
 - **配置与代码解耦**：提示词模板 / 模型参数 / 安全规则统一 YAML 管理，非代码人员可调优
 - **客观验证闭环**：历史最优快照回退、冒烟测试兜底、循环次数护栏，保证收敛不失控
 - **可中止执行（停止生成）**：任务注册表按 run_id 跟踪执行 Task，cancel 真正终止图执行与 LLM 调用（CancelledError 注入）；stopped 会话独立状态可回放
-- **全栈工程化**：前后端接口契约严格对齐、Docker 四服务编排、Makefile 快捷命令、结构化日志
+- **全栈工程化**：前后端接口契约严格对齐、Docker 五服务编排、Makefile 快捷命令、结构化日志
 
 ---
 

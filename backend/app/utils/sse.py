@@ -4,7 +4,7 @@
 """
 
 import json
-from typing import Any, Dict
+from typing import Any
 
 # SSE 事件名约定（与前端 types/agent.ts 的 SSEEvent 严格对齐，禁止私自变更）
 EVENT_START = "agent_start"
@@ -18,7 +18,7 @@ EVENT_ERROR = "error"
 EVENT_CONFIRMATION = "confirmation_required"
 
 
-def format_sse(event: str, data: Dict[str, Any]) -> str:
+def format_sse(event: str, data: dict[str, Any]) -> str:
     """将事件格式化为 SSE 协议消息：event 行 + data 行（JSON）+ 空行结束。
 
     default=str 兜底非 JSON 序列化对象（如 datetime），保证推送不中断。

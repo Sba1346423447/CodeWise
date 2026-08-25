@@ -59,7 +59,7 @@ class TestFileEditorWrite:
             action="write", path="sub/dir/new.py", content="print('hello')\n"
         )
         assert result["success"] is True
-        assert result["bytes"] == len("print('hello')\n".encode("utf-8"))
+        assert result["bytes"] == len(b"print('hello')\n")
         written = (pathlib.Path(root_dir) / "sub" / "dir" / "new.py").read_text(encoding="utf-8")
         assert written == "print('hello')\n"
 

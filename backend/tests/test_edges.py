@@ -13,6 +13,7 @@ from app.core.graph.edges import (
     route_after_react,
     route_after_reflect,
     route_after_review,
+    route_after_test,
 )
 from app.core.graph.state import AgentState
 
@@ -122,6 +123,26 @@ class TestRouteAfterCodeConfirm:
     def test_用户拒绝_回react换方案(self):
         state = AgentState(security_confirmation=False)
         assert route_after_code_confirm(state) == "react_node"
+
+
+class TestRouteAfterTest:
+    """测试出口路由（Codex 式：通过即交付 / 坏测试修测试 / 真实失败才反思）"""
+
+    def test_测试通过_跳过反思直接交付(self):
+        state = AgentState(tests_passed=True)
+        assert route_after_test(state) == "finalize_node"
+
+    def test_测试崩溃且未超上限_重生成测试(self):
+        state = AgentState(test_broken=True, test_regen_count=0)
+        assert route_after_test(state) == "test_gen_node"
+
+    def test_测试崩溃但已重生成过_进反思兜底(self):
+        state = AgentState(test_broken=True, test_regen_count=1)
+        assert route_after_test(state) == "reflect_node"
+
+    def test_真实失败_进入反思(self):
+        state = AgentState(tests_passed=False)
+        assert route_after_test(state) == "reflect_node"
 
 
 class TestRouteAfterReflect:

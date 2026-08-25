@@ -9,7 +9,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from typing import Optional
 
 # 默认执行超时（秒），环境变量 SANDBOX_TIMEOUT 可覆盖
 DEFAULT_TIMEOUT = int(os.getenv("SANDBOX_TIMEOUT", "30"))
@@ -44,7 +43,7 @@ class Sandbox:
 
     def __init__(self, timeout: int = DEFAULT_TIMEOUT):
         self.timeout = timeout
-        self.workdir: Optional[str] = None
+        self.workdir: str | None = None
 
     def create(self) -> str:
         """创建隔离临时目录，返回工作目录路径。"""

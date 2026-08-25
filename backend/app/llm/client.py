@@ -4,7 +4,7 @@
 """
 
 import time
-from typing import AsyncIterator, List, Optional
+from collections.abc import AsyncIterator
 
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletion
@@ -24,7 +24,7 @@ class LLMClient:
 
     def __init__(self) -> None:
         self.model = config.model
-        self._client: Optional[AsyncOpenAI] = None
+        self._client: AsyncOpenAI | None = None
 
     def _get_client(self) -> AsyncOpenAI:
         """懒加载底层客户端：首次调用时校验 API Key，避免导入期抛异常。
@@ -48,9 +48,9 @@ class LLMClient:
 
     def _build_kwargs(
         self,
-        messages: List[dict],
-        tools: Optional[List[dict]],
-        model: Optional[str] = None,
+        messages: list[dict],
+        tools: list[dict] | None,
+        model: str | None = None,
     ) -> dict:
         """组装公共请求参数；tools 为空时不传，避免 OpenAI 拒绝空列表。
 
@@ -68,9 +68,9 @@ class LLMClient:
 
     async def chat(
         self,
-        messages: List[dict],
-        tools: Optional[List[dict]] = None,
-        model: Optional[str] = None,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        model: str | None = None,
     ) -> ChatCompletion:
         """非流式对话：返回完整响应，调用方自行解析 content 或 tool_calls。"""
         start = time.monotonic()
@@ -100,10 +100,10 @@ class LLMClient:
 
     async def chat_or_none(
         self,
-        messages: List[dict],
-        tools: Optional[List[dict]] = None,
-        model: Optional[str] = None,
-    ) -> Optional[ChatCompletion]:
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        model: str | None = None,
+    ) -> ChatCompletion | None:
         """容错对话：LLM 失败/超时返回 None 而非抛异常，供节点降级处理。
 
         设计意图：反思/优化等辅助环节的超时不应让整个 Agent 流程崩溃。
@@ -117,9 +117,9 @@ class LLMClient:
 
     async def chat_stream(
         self,
-        messages: List[dict],
-        tools: Optional[List[dict]] = None,
-        model: Optional[str] = None,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        model: str | None = None,
     ) -> AsyncIterator[dict]:
         """流式对话：逐块产出统一事件，供上层 SSE 推送。
 

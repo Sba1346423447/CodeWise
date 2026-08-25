@@ -9,7 +9,7 @@ import asyncio
 
 import pytest
 
-from app.api.agent import StopRequest, _RUNNING_TASKS, stop_agent
+from app.api.agent import _RUNNING_TASKS, StopRequest, stop_agent
 
 
 @pytest.fixture(autouse=True)

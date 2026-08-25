@@ -13,6 +13,10 @@ venv/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+# 本地 lint 工具副本（site-packages 权限受限时的项目内安装，仅本机使用）
+backend/.lint-tools/
+.coverage
+htmlcov/
 
 # ===== Node / 前端 =====
 node_modules/
@@ -47,3 +51,10 @@ code.md
 
 # ===== AI 工具工作数据（不上传） =====
 .workbuddy/
+
+# ===== 开发过程文档（本地留档，不上传 GitHub） =====
+# 优化方案 / 迭代规划 / 阶段性工作记录
+CodeWise.md
+CodeWise优化方案v2.md
+CodeWise优化方案v3-*.md
+docs/

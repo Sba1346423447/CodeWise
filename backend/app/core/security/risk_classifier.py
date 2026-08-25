@@ -13,11 +13,12 @@
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 import yaml
 
 from ...llm.client import client
+from ...llm.config import config as llm_config
 from ...utils.logger import get_logger
 
 logger = get_logger("core.security.risk_classifier")
@@ -58,7 +59,7 @@ def _is_risk_classifier_enabled() -> bool:
         return True
 
 
-def _parse_risk(text: str) -> Optional[Dict[str, str]]:
+def _parse_risk(text: str) -> dict[str, str] | None:
     """从 LLM 响应文本提取 {"risk", "reason"}；无合法 JSON 返回 None。"""
     if not text:
         return None
@@ -77,10 +78,10 @@ def _parse_risk(text: str) -> Optional[Dict[str, str]]:
 
 async def classify_tool_call(
     tool_name: str,
-    args: Dict[str, Any],
+    args: dict[str, Any],
     task_desc: str,
     model: str = "",
-) -> Dict[str, str]:
+) -> dict[str, str]:
     """对单个工具调用做 AI 风险分类，返回 {"risk", "reason"}。
 
     关闭开关 / 提示词缺失 / LLM 失败 / 解析失败时返回 confirm（保守降级，
@@ -103,7 +104,8 @@ async def classify_tool_call(
     )
     response = await client.chat_or_none(
         messages=[{"role": "system", "content": prompt}],
-        model=model or None,
+        # 风险分类是受控输出角色（单 JSON 判定），优先用轻量模型提速
+        model=llm_config.fast_model or model or None,
     )
     content = (response.choices[0].message.content or "") if response else ""
     verdict = _parse_risk(content)

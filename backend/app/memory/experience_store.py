@@ -2,7 +2,6 @@
 
 import os
 import uuid
-from typing import Dict, List, Optional
 
 import chromadb
 from chromadb.config import Settings
@@ -48,7 +47,7 @@ class ExperienceStore:
         task_desc: str,
         code: str,
         summary: str,
-        experience_id: Optional[str] = None,
+        experience_id: str | None = None,
     ) -> str:
         """写入一条经验：task_desc 作为检索文本，code 与 summary 作为元数据。
 
@@ -69,7 +68,7 @@ class ExperienceStore:
             logger.warning(f"经验写入失败，跳过：{exc}")
         return doc_id
 
-    def retrieve_similar(self, task_desc: str, top_k: int = 3) -> List[Dict]:
+    def retrieve_similar(self, task_desc: str, top_k: int = 3) -> list[dict]:
         """按任务描述检索最相似的历史经验，按相似度升序返回（distance 越小越相似）。"""
         if self._collection is None:
             return []  # 经验库不可用时返回空结果

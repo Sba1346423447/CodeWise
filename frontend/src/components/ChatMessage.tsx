@@ -9,11 +9,9 @@
 import { memo, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import Prism from "prismjs";
-import "prismjs/components/prism-python";
 import type { ReactNode } from "react";
 import type { TestResults, ThinkingItem } from "../types/agent";
 import { CodeFileViewer } from "./CodeFileViewer";
-import { TestResultsPanel } from "./TestResultsPanel";
 import { ThinkingBlock } from "./ThinkingBlock";
 
 /** 单条对话消息（与后端 messages 表 + 前端 state 对齐） */
@@ -143,6 +141,8 @@ function MessageActions({
 
 function ChatMessageInner({ message, streaming = false, onRegenerate }: ChatMessageProps) {
   const isUser = message.role === "user";
+  // Hooks 必须无条件调用（rules-of-hooks）：复制状态提前声明，用户消息不使用
+  const [copied, setCopied] = useState(false);
 
   // 用户消息：靠右，浅灰背景圆角卡片，深灰文字，无描边（低饱和克制）
   if (isUser) {
@@ -159,7 +159,6 @@ function ChatMessageInner({ message, streaming = false, onRegenerate }: ChatMess
   }
 
   // AI 消息：靠左带头像，纯文本不加背景卡片
-  const [copied, setCopied] = useState(false);
   const copyWhole = async () => {
     const text = [message.content, message.code].filter(Boolean).join("\n\n");
     try {
@@ -180,24 +179,10 @@ function ChatMessageInner({ message, streaming = false, onRegenerate }: ChatMess
       </div>
 
       <div className="w-full max-w-[85%] pt-1">
-        {/* ① 状态条：已完成 + 耗时，测试通过带绿色对勾 */}
+        {/* ① 状态条：只展示耗时（验证结果是内部质量流程，不进用户界面） */}
         <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
-          {message.testsPassed !== undefined && (
-            <span
-              className={`flex items-center gap-1 font-medium ${
-                message.testsPassed
-                  ? "text-success dark:text-emerald-400"
-                  : "text-danger dark:text-rose-400"
-              }`}
-            >
-              {message.testsPassed ? "✓ 已完成" : "✗ 未通过"}
-            </span>
-          )}
           {message.elapsedMs !== undefined && (
             <span className="text-gray-400 dark:text-gray-500">耗时 {formatElapsed(message.elapsedMs)}</span>
-          )}
-          {message.reflections !== undefined && message.reflections > 0 && (
-            <span className="text-gray-400 dark:text-gray-500">反思 {message.reflections} 轮</span>
           )}
         </div>
 
@@ -253,18 +238,11 @@ function ChatMessageInner({ message, streaming = false, onRegenerate }: ChatMess
               code={message.code}
               lines={message.codeLines ?? 0}
               streaming={streaming}
-              testsPassed={message.testsPassed}
-              reflections={message.reflections}
             />
           </div>
         )}
 
-        {/* ⑤ 测试结果面板 */}
-        {message.testResults !== undefined && (
-          <TestResultsPanel results={message.testResults} testsPassed={message.testsPassed} />
-        )}
-
-        {/* ⑥ 消息底部：操作栏 + 元信息 */}
+        {/* ⑤ 消息底部：操作栏 + 元信息（验证详情属内部质量流程，不渲染） */}
         <div className="mt-2 flex items-center justify-between">
           <MessageActions
             onCopy={copyWhole}

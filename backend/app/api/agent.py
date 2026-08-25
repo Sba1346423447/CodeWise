@@ -15,7 +15,7 @@ confirmation 字段（run_id + approved）重新请求本接口，恢复挂起�
 import asyncio
 import json
 import uuid
-from typing import AsyncGenerator, Dict, Optional
+from collections.abc import AsyncGenerator
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -42,7 +42,7 @@ router = APIRouter(prefix="/api", tags=["agent"])
 # 运行中任务注册表：run_id → asyncio.Task（run_and_finish）。
 # 前端停止生成时凭 run_id 找到任务并 cancel，真正终止图执行；
 # 任务结束（正常/异常/取消）后自行注销，注册表始终只含活跃任务。
-_RUNNING_TASKS: Dict[str, "asyncio.Task[None]"] = {}
+_RUNNING_TASKS: dict[str, "asyncio.Task[None]"] = {}
 
 # 图节点名 → 步骤类型映射
 _NODE_TO_STEP = {
@@ -74,10 +74,10 @@ class AgentRequest(BaseModel):
     挂起线程（此时 task_desc 可为空）。
     """
 
-    task_desc: Optional[str] = None
-    session_id: Optional[str] = None
-    model: Optional[str] = None  # 前端模型下拉选择；为空时后端使用默认配置
-    confirmation: Optional[ConfirmationRequest] = None
+    task_desc: str | None = None
+    session_id: str | None = None
+    model: str | None = None  # 前端模型下拉选择；为空时后端使用默认配置
+    confirmation: ConfirmationRequest | None = None
 
 
 class StopRequest(BaseModel):
@@ -155,7 +155,7 @@ async def run_agent(request: AgentRequest) -> StreamingResponse:
 
     async def event_stream() -> AsyncGenerator[str, None]:
         # 队列桥接：编排器回调协程放消息，SSE 生成器消费并 yield
-        queue: "asyncio.Queue[object]" = asyncio.Queue()
+        queue: asyncio.Queue[object] = asyncio.Queue()
         sentinel = object()
 
         async def on_event(event: dict) -> None:

@@ -6,7 +6,7 @@ v2 设计：注入测试失败详情（test_results），让反思基于客观�
 """
 
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 import yaml
 
@@ -22,7 +22,7 @@ def _load_templates() -> dict:
     return raw.get("reflection", {})
 
 
-def _format_test_results(test_results: Dict[str, Any]) -> str:
+def _format_test_results(test_results: dict[str, Any]) -> str:
     """将测试失败详情格式化为提示词片段；无有效失败信息时返回空串。"""
     if not test_results:
         return ""
@@ -42,7 +42,7 @@ def build_reflection_prompt(
     code: str,
     round_index: int = 1,
     task_desc: str = "",
-    test_results: Dict[str, Any] | None = None,
+    test_results: dict[str, Any] | None = None,
 ) -> str:
     """组装批判审查提示词：系统指令 + 原始用户需求 + 测试结果 + 待审查代码 + 输出格式。
 

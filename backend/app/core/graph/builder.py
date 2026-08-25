@@ -12,7 +12,8 @@
 - code_confirm_node → test_gen_node / react_node：人工批准执行 / 拒绝换方案
 - tool_node → react_node：闭合 ReAct 循环
 - test_gen_node → test_node：生成测试后强制真实 pytest
-- test_node → reflect_node：无论结果如何都进入反思（失败详情注入）
+- test_node → finalize_node / test_gen_node / reflect_node：测试通过直接交付 /
+  测试自身崩溃回炉重生成（代码不动）/ 真实失败进入反思
 - reflect_node → finalize_node / refine_node：通过或超限收尾，否则优化重写
 - refine_node → code_review_node：代码已变，先过安全审查再重新生成测试验证
 - finalize_node → END：保证有交付物后结束
@@ -32,6 +33,7 @@ from .edges import (
     route_after_react,
     route_after_reflect,
     route_after_review,
+    route_after_test,
 )
 from .nodes import (
     code_confirm_node,
@@ -131,8 +133,19 @@ def build_agent_graph():
     # 测试链路：生成测试 → 真实执行
     graph.add_edge("test_gen_node", "test_node")
 
-    # 无论测试结果如何都进入反思审查（失败详情注入，让反思基于客观事实）
-    graph.add_edge("test_node", "reflect_node")
+    # 测试出口条件路由（Codex 式：通过即交付，坏测试修测试，真实失败才反思）：
+    # - 通过 → finalize_node（跳过反思，省一次 LLM 调用）
+    # - 测试自身崩溃且未超重生成上限 → test_gen_node（重生成测试，代码不动）
+    # - 真实失败 → reflect_node（失败详情注入，反思基于客观事实）
+    graph.add_conditional_edges(
+        "test_node",
+        route_after_test,
+        {
+            "finalize_node": "finalize_node",
+            "test_gen_node": "test_gen_node",
+            "reflect_node": "reflect_node",
+        },
+    )
 
     # reflect_node 出口：条件路由（通过/超限/失效 → 收尾，否则 → refine）
     graph.add_conditional_edges("reflect_node", route_after_reflect)

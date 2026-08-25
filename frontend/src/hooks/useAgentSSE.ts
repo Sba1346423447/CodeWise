@@ -17,6 +17,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentResult, PendingConfirmation, SSEEvent, ThinkingItem } from "../types/agent";
 import type { ChatMessageData } from "../components/ChatMessage";
+import { authHeaders } from "../utils/api";
 
 /** SSE 运行状态 */
 export type SSEStatus = "idle" | "running" | "done" | "error";
@@ -177,7 +178,7 @@ export function useAgentSSE() {
     ): Promise<boolean> => {
       const response = await fetch("/api/agent", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...authHeaders() },
         body: JSON.stringify(
           resumeConfirmation
             ? { session_id: sessionId, confirmation: resumeConfirmation }
@@ -282,13 +283,9 @@ export function useAgentSSE() {
                 ),
               );
               const summary = (result.final_message ?? "").trim();
-              // 挂起轮：正文打"等待确认"徽标而非测试结论（尚未跑测试链路）
-              const verifyNote = result.pending_confirmation
-                ? "⏸ 等待人工确认"
-                : isAnswerOnly
-                  ? ""
-                  : `${result.tests_passed ? "✅ 已完成" : "⚠️ 需要优化"} · 已优化 ${result.reflection_count} 轮`;
-              const target = [summary, verifyNote].filter(Boolean).join("\n\n");
+              // 挂起轮提示人工确认（功能性状态）；验证结论属内部质量流程，不拼接
+              const pendingNote = result.pending_confirmation ? "⏸ 等待人工确认" : "";
+              const target = [summary, pendingNote].filter(Boolean).join("\n\n");
               const backendThinking = normalizeThinking(result.thinking);
               await Promise.all([
                 typeOutText(assistantMsg.id, target),
@@ -386,7 +383,7 @@ export function useAgentSSE() {
     if (runIdRef.current) {
       fetch("/api/agent/stop", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...authHeaders() },
         body: JSON.stringify({ run_id: runIdRef.current }),
       }).catch(() => {
         /* 后端不可达时仍继续本地停止（仅断开流，任务由后端超时兜底） */

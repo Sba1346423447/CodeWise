@@ -8,7 +8,7 @@ import ast
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Union
+from typing import Any
 
 from ..utils.logger import get_logger
 
@@ -26,7 +26,7 @@ _SKIP_DIRS = {"__pycache__", ".venv", "venv", "node_modules", ".git"}
 _MAX_ENTRIES_PER_FILE = 50
 
 
-def load_repo_map_config() -> Dict[str, Any]:
+def load_repo_map_config() -> dict[str, Any]:
     """读取 settings.yaml 的 repo_map 段；读取失败回退默认值（root 空 = 禁用）。
 
     供 nodes.py（react_node 注入）与 tools/file_editor.py（路径根目录校验）复用。
@@ -40,7 +40,7 @@ def load_repo_map_config() -> Dict[str, Any]:
         return {}
 
 
-def _format_signature(node: Union[ast.FunctionDef, ast.AsyncFunctionDef]) -> str:
+def _format_signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
     """生成函数/方法签名文本（含参数类型注解与返回注解）。
 
     ast.unparse(arguments) 输出不带括号且默认值紧凑（如 `b: str=1`），
@@ -55,9 +55,9 @@ def _format_signature(node: Union[ast.FunctionDef, ast.AsyncFunctionDef]) -> str
     return f"{prefix} {node.name}({args}){ret}"
 
 
-def _extract_symbols(tree: ast.Module) -> List[str]:
+def _extract_symbols(tree: ast.Module) -> list[str]:
     """提取顶层类（含类内方法签名）与顶层函数签名，输出紧凑符号列表。"""
-    lines: List[str] = []
+    lines: list[str] = []
     for node in tree.body:
         if isinstance(node, ast.ClassDef):
             lines.append(f"class {node.name}")
@@ -69,7 +69,7 @@ def _extract_symbols(tree: ast.Module) -> List[str]:
     return lines
 
 
-def _build_file_summary(rel_path: str, file_path: Path) -> List[str]:
+def _build_file_summary(rel_path: str, file_path: Path) -> list[str]:
     """解析单个 .py 文件，返回其符号摘要；解析失败跳过（记录 warning），不中断整体。"""
     try:
         source = file_path.read_text(encoding="utf-8")
@@ -93,7 +93,7 @@ def build_repo_map(root: str, max_chars: int = 2000) -> str:
     if not root_path.is_dir():
         return ""
 
-    blocks: List[str] = []
+    blocks: list[str] = []
     total = 0
     truncated = False
     for dirpath, dirnames, filenames in os.walk(root_path):

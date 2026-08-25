@@ -8,7 +8,7 @@
 """
 
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any
 
 from ..repo_map import load_repo_map_config
 from ..security.rule_filter import check_path_patterns
@@ -25,7 +25,7 @@ class FileEditor(Tool):
     description = "读取或写入项目文件（文本），路径须位于配置的项目根目录内"
 
     @property
-    def parameters(self) -> Dict[str, Any]:
+    def parameters(self) -> dict[str, Any]:
         return {
             "type": "object",
             "properties": {
@@ -46,7 +46,7 @@ class FileEditor(Tool):
             "required": ["action", "path"],
         }
 
-    def _resolve_target(self, path: str) -> Tuple[Path | None, str | None]:
+    def _resolve_target(self, path: str) -> tuple[Path | None, str | None]:
         """解析目标路径并做越权校验：必须位于项目根目录内。
 
         返回 (目标路径, None) 或 (None, 错误信息)。root 未配置时直接拒绝。
@@ -68,7 +68,7 @@ class FileEditor(Tool):
             return None, "路径超出项目根目录"
         return target, None
 
-    def _read(self, target: Path) -> Dict[str, Any]:
+    def _read(self, target: Path) -> dict[str, Any]:
         """读取文件文本；不存在或读取失败返回 success=False，超大文件截断。"""
         try:
             if not target.is_file():
@@ -86,7 +86,7 @@ class FileEditor(Tool):
             "truncated": truncated,
         }
 
-    def _write(self, target: Path, content: str) -> Dict[str, Any]:
+    def _write(self, target: Path, content: str) -> dict[str, Any]:
         """写入文件（目录自动创建）；写入失败返回 success=False。"""
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -96,7 +96,7 @@ class FileEditor(Tool):
             return {"success": False, "error": f"写入失败：{exc}"}
         return {"success": True, "bytes": len(data)}
 
-    def execute(self, **kwargs: Any) -> Dict[str, Any]:
+    def execute(self, **kwargs: Any) -> dict[str, Any]:
         """执行读/写操作；任何异常返回 success=False（不抛异常，与现有工具一致）。"""
         action = str(kwargs.get("action", "") or "").strip()
         path = str(kwargs.get("path", "") or "").strip()

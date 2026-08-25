@@ -18,6 +18,7 @@ class LLMConfig(BaseModel):
     """LLM 调用参数：环境变量优先级高于 settings.yaml。"""
 
     model: str = Field(default="gpt-4o-mini", description="模型名称")
+    fast_model: str = Field(default="", description="轻量模型（审查/测试生成/反思/总结等受控角色）；留空回落主模型")
     temperature: float = Field(default=0.2, ge=0.0, le=2.0, description="采样温度")
     max_tokens: int = Field(default=4096, gt=0, description="单次生成最大 token 数")
     base_url: str = Field(
@@ -38,6 +39,7 @@ class LLMConfig(BaseModel):
 
         return cls(
             model=os.getenv("LLM_MODEL", data.get("model", "gpt-4o-mini")),
+            fast_model=os.getenv("LLM_FAST_MODEL", data.get("fast_model", "")),
             temperature=float(os.getenv("LLM_TEMPERATURE", data.get("temperature", 0.2))),
             max_tokens=int(os.getenv("LLM_MAX_TOKENS", data.get("max_tokens", 4096))),
             base_url=os.getenv("OPENAI_BASE_URL", data.get("base_url", "https://api.openai.com/v1")),

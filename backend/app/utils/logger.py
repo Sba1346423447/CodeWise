@@ -25,14 +25,16 @@ def setup_logging() -> None:
     """初始化全局日志：控制台 + 文件双输出，文件按日轮转、保留 7 天。
 
     remove() 先移除默认 handler，保证重复调用不产生重复输出。
+    审计日志独立写入 audit_*.log（仅记录 audit 标记事件），保留 30 天。
     """
     logger.remove()
 
     # 控制台：彩色结构化输出
     logger.add(sys.stderr, level=LOG_LEVEL, format=_FORMAT, enqueue=True)
 
-    # 文件：按日轮转，utf-8 编码，保留 7 天
     os.makedirs(LOG_DIR, exist_ok=True)
+
+    # 文件：按日轮转，utf-8 编码，保留 7 天
     logger.add(
         os.path.join(LOG_DIR, "codewise_{time:YYYY-MM-DD}.log"),
         level=LOG_LEVEL,
@@ -43,7 +45,25 @@ def setup_logging() -> None:
         enqueue=True,
     )
 
+    # 审计文件：仅记录 audit 标记的请求审计事件（见 main.AuditLogMiddleware），
+    # 纯文本无颜色标记，保留 30 天便于安全回溯
+    logger.add(
+        os.path.join(LOG_DIR, "audit_{time:YYYY-MM-DD}.log"),
+        level="INFO",
+        format="{time:YYYY-MM-DD HH:mm:ss} | {extra[module]} | {message}",
+        filter=lambda record: record["extra"].get("audit") is True,
+        rotation="00:00",
+        retention="30 days",
+        encoding="utf-8",
+        enqueue=True,
+    )
+
 
 def get_logger(name: str):
     """绑定模块名的 logger：记录注入 extra[module]，便于定位日志来源。"""
     return logger.patch(lambda record: record["extra"].setdefault("module", name))
+
+
+def get_audit_logger():
+    """审计 logger：绑定 audit 标记，事件独立写入 audit_*.log。"""
+    return logger.bind(audit=True, module="audit")

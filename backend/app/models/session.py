@@ -4,7 +4,6 @@
 """
 
 import uuid
-from typing import Dict, List, Optional
 
 from .database import get_connection
 
@@ -18,95 +17,94 @@ STATUS_STOPPED = "stopped"
 STATUS_AWAITING = "awaiting_confirmation"
 
 
-async def create_session(task_desc: str) -> Dict:
+async def create_session(task_desc: str) -> dict:
     """创建新会话（初始状态 running），返回完整会话记录。"""
     session_id = uuid.uuid4().hex
     conn = await get_connection()
     try:
-        await conn.execute(
-            "INSERT INTO sessions (session_id, task_desc) VALUES (?, ?)",
-            (session_id, task_desc),
-        )
+        async with conn.cursor() as cursor:
+            await cursor.execute(
+                "INSERT INTO sessions (session_id, task_desc) VALUES (%s, %s)",
+                (session_id, task_desc),
+            )
         await conn.commit()
     finally:
-        await conn.close()
+        conn.close()
 
     session = await get_session(session_id)
     return session or {}
 
 
-async def get_session(session_id: str) -> Optional[Dict]:
+async def get_session(session_id: str) -> dict | None:
     """按 ID 查询会话；不存在返回 None。"""
     conn = await get_connection()
     try:
-        async with conn.execute(
-            "SELECT * FROM sessions WHERE session_id = ?", (session_id,)
-        ) as cursor:
-            row = await cursor.fetchone()
-            return dict(row) if row else None
+        async with conn.cursor() as cursor:
+            await cursor.execute(
+                "SELECT * FROM sessions WHERE session_id = %s", (session_id,)
+            )
+            return await cursor.fetchone()
     finally:
-        await conn.close()
+        conn.close()
 
 
-async def list_sessions() -> List[Dict]:
+async def list_sessions() -> list[dict]:
     """列出全部会话，按创建时间倒序（最新在前）。"""
     conn = await get_connection()
     try:
-        async with conn.execute(
-            "SELECT * FROM sessions ORDER BY created_at DESC"
-        ) as cursor:
-            rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
+        async with conn.cursor() as cursor:
+            await cursor.execute("SELECT * FROM sessions ORDER BY created_at DESC")
+            return list(await cursor.fetchall())
     finally:
-        await conn.close()
+        conn.close()
 
 
 async def update_session(
     session_id: str,
-    status: Optional[str] = None,
-    final_code: Optional[str] = None,
+    status: str | None = None,
+    final_code: str | None = None,
 ) -> None:
     """更新会话状态与最终代码（仅更新传入的非 None 字段）。"""
     conn = await get_connection()
     try:
-        if status is not None:
-            await conn.execute(
-                "UPDATE sessions SET status = ? WHERE session_id = ?",
-                (status, session_id),
-            )
-        if final_code is not None:
-            await conn.execute(
-                "UPDATE sessions SET final_code = ? WHERE session_id = ?",
-                (final_code, session_id),
-            )
+        async with conn.cursor() as cursor:
+            if status is not None:
+                await cursor.execute(
+                    "UPDATE sessions SET status = %s WHERE session_id = %s",
+                    (status, session_id),
+                )
+            if final_code is not None:
+                await cursor.execute(
+                    "UPDATE sessions SET final_code = %s WHERE session_id = %s",
+                    (final_code, session_id),
+                )
         await conn.commit()
     finally:
-        await conn.close()
+        conn.close()
 
 
 async def rename_session(session_id: str, task_desc: str) -> None:
     """重命名会话（更新任务描述，供前端标题栏重命名操作）。"""
     conn = await get_connection()
     try:
-        await conn.execute(
-            "UPDATE sessions SET task_desc = ? WHERE session_id = ?",
-            (task_desc, session_id),
-        )
+        async with conn.cursor() as cursor:
+            await cursor.execute(
+                "UPDATE sessions SET task_desc = %s WHERE session_id = %s",
+                (task_desc, session_id),
+            )
         await conn.commit()
     finally:
-        await conn.close()
+        conn.close()
 
 
 async def delete_session(session_id: str) -> None:
-    """删除会话及其关联数据（先删子表再删主表，绕过 SQLite 无级联定义）。
-
-    messages 表同样外键引用 sessions，必须先删，否则外键约束会导致删除失败。
-    """
+    """删除会话及其关联数据（先删子表再删主表，满足外键约束）。"""
     conn = await get_connection()
     try:
-        await conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
-        await conn.execute("DELETE FROM steps WHERE session_id = ?", (session_id,))
-        await conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+        async with conn.cursor() as cursor:
+            await cursor.execute("DELETE FROM messages WHERE session_id = %s", (session_id,))
+            await cursor.execute("DELETE FROM steps WHERE session_id = %s", (session_id,))
+            await cursor.execute("DELETE FROM sessions WHERE session_id = %s", (session_id,))
         await conn.commit()
     finally:
-        await conn.close()
+        conn.close()

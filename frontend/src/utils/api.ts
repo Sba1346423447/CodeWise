@@ -9,6 +9,14 @@ import type { AgentStep, SessionInfo, StoredMessage } from "../types/agent";
 // 如未来需要指向独立后端域名，可改为通过构建时注入（vite define / 环境变量）替换
 const BASE_URL = "";
 
+/** API Key：优先读运行时配置（localStorage，供生产环境注入），回落构建时 VITE_API_KEY */
+const API_KEY = localStorage.getItem("codewise_api_key") || import.meta.env.VITE_API_KEY || "";
+
+/** 鉴权请求头：后端开启鉴权后所有 /api 请求须携带；未配置则空对象（本地开发模式） */
+export function authHeaders(): Record<string, string> {
+  return API_KEY ? { "X-API-Key": API_KEY } : {};
+}
+
 /** 统一 API 异常：携带 HTTP 状态码与后端返回的 detail 信息 */
 export class ApiError extends Error {
   status: number;
@@ -23,8 +31,8 @@ export class ApiError extends Error {
 /** 统一 JSON 请求封装：非 2xx 抛 ApiError，成功返回解析后的数据 */
 async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(`${BASE_URL}${path}`, {
-    headers: { "Content-Type": "application/json", ...options.headers },
     ...options,
+    headers: { "Content-Type": "application/json", ...authHeaders(), ...options.headers },
   });
 
   if (!response.ok) {
@@ -80,7 +88,9 @@ export async function exportSession(
   sessionId: string,
   format: "markdown" | "json" = "markdown",
 ): Promise<string | Record<string, unknown>> {
-  const response = await fetch(`${BASE_URL}/api/export/${sessionId}?format=${format}`);
+  const response = await fetch(`${BASE_URL}/api/export/${sessionId}?format=${format}`, {
+    headers: authHeaders(),
+  });
   if (!response.ok) {
     const body = await response.json().catch(() => null);
     throw new ApiError(response.status, body?.detail ?? `导出失败（${response.status}）`);

@@ -6,8 +6,8 @@ import pytest
 
 from app.core.graph import nodes as graph_nodes
 from app.core.graph.nodes import (
-    _extract_code_from_tool_arguments,
     _code_fingerprint,
+    _extract_code_from_tool_arguments,
     code_confirm_node,
     code_review_node,
     extract_code,
@@ -254,6 +254,80 @@ class TestCodeConfirmNode:
         tools = captured["pending_tools"]
         assert tools[0]["tool"] == "代码执行"
         assert "网络外联" in tools[0]["reason"]
+
+
+class TestTestNodeBrokenSplit:
+    """test_node 分流：collection error 标记 test_broken（修测试而非改代码）。"""
+
+    @staticmethod
+    def _state(test_code: str) -> AgentState:
+        return AgentState(current_code="def add(a, b):\n    return a + b\n",
+                          test_code=test_code)
+
+    @pytest.mark.asyncio
+    async def test_测试崩溃_标记test_broken(self, monkeypatch):
+        # 模拟 collection error：errors=1 且 passed+failed==0（一条用例没执行）
+        def fake_execute(self, code, test_code):
+            return {"success": False, "passed": 0, "failed": 0, "errors": 1,
+                    "output": "ImportError: cannot import name 'missing'"}
+
+        monkeypatch.setattr(graph_nodes.TestRunner, "execute", fake_execute)
+        update = await graph_nodes.test_node(self._state("import missing\n\ndef test_x():\n    pass\n"))
+        assert update["test_broken"] is True
+        assert update["tests_passed"] is False
+
+    @pytest.mark.asyncio
+    async def test_真实失败_不标记test_broken(self, monkeypatch):
+        # 断言失败：failed=1（用例真实执行了），问题在代码，走反思链路
+        def fake_execute(self, code, test_code):
+            return {"success": False, "passed": 0, "failed": 1, "errors": 0,
+                    "output": "assert 3 == 4"}
+
+        monkeypatch.setattr(graph_nodes.TestRunner, "execute", fake_execute)
+        update = await graph_nodes.test_node(self._state("def test_x():\n    assert False\n"))
+        assert update["test_broken"] is False
+        assert update["tests_passed"] is False
+
+    @pytest.mark.asyncio
+    async def test_通过_不标记且更新快照(self, monkeypatch):
+        def fake_execute(self, code, test_code):
+            return {"success": True, "passed": 2, "failed": 0, "errors": 0,
+                    "output": "2 passed"}
+
+        monkeypatch.setattr(graph_nodes.TestRunner, "execute", fake_execute)
+        state = self._state("def test_x():\n    assert True\n")
+        update = await graph_nodes.test_node(state)
+        assert update["test_broken"] is False
+        assert update["tests_passed"] is True
+        assert update["best_code"] == state.current_code
+
+
+class TestFinalSummaryProductized:
+    """交付总结：不暴露内部机制，不输出调试建议。"""
+
+    @pytest.mark.asyncio
+    async def test_总结prompt含产品化约束(self, monkeypatch):
+        captured: dict = {}
+
+        class FakeMsg:
+            class message:
+                content = "已完成。"
+
+        class FakeResp:
+            choices = [FakeMsg()]
+
+        async def fake_chat(messages, model=None, **kwargs):
+            captured["prompt"] = messages[0]["content"]
+            captured["model"] = model
+            return FakeResp()
+
+        monkeypatch.setattr(graph_nodes.client, "chat_or_none", fake_chat)
+        await graph_nodes._build_final_summary("写个加法", "def add(a,b):\n    return a+b\n",
+                                               False, 2, model="")
+        assert "内部机制" in captured["prompt"]
+        assert "调试建议" in captured["prompt"]
+        # 反思轮次等内部信息不再注入 prompt
+        assert "优化轮次" not in captured["prompt"]
 
 
 if __name__ == "__main__":

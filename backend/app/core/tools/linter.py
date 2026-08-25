@@ -4,7 +4,7 @@
 """
 
 import ast
-from typing import Any, Dict, List
+from typing import Any
 
 from .base import Tool
 
@@ -23,7 +23,7 @@ class Linter(Tool):
     description = "对 Python 代码执行静态风格检查，返回代码质量问题列表（行号、规则、修改建议）。"
 
     @property
-    def parameters(self) -> Dict[str, Any]:
+    def parameters(self) -> dict[str, Any]:
         return {
             "type": "object",
             "properties": {
@@ -32,7 +32,7 @@ class Linter(Tool):
             "required": ["code"],
         }
 
-    def _check_syntax(self, code: str) -> List[Dict[str, Any]]:
+    def _check_syntax(self, code: str) -> list[dict[str, Any]]:
         """语法检查：AST 解析失败即报语法错误。"""
         try:
             ast.parse(code)
@@ -47,7 +47,7 @@ class Linter(Tool):
                 }
             ]
 
-    def _check_lines(self, code: str) -> List[Dict[str, Any]]:
+    def _check_lines(self, code: str) -> list[dict[str, Any]]:
         """逐行检查：行长超限、行尾多余空白。"""
         issues = []
         for lineno, line in enumerate(code.splitlines(), start=1):
@@ -71,9 +71,9 @@ class Linter(Tool):
                 )
         return issues
 
-    def _check_unused_imports(self, tree: ast.Module) -> List[Dict[str, Any]]:
+    def _check_unused_imports(self, tree: ast.Module) -> list[dict[str, Any]]:
         """检查导入了但从未引用的名字（F401 风格）。"""
-        imported: Dict[str, int] = {}
+        imported: dict[str, int] = {}
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
@@ -96,7 +96,7 @@ class Linter(Tool):
             if name not in used
         ]
 
-    def execute(self, **kwargs: Any) -> Dict[str, Any]:
+    def execute(self, **kwargs: Any) -> dict[str, Any]:
         code = kwargs.get("code", "")
         if not code.strip():
             return {"success": False, "error": "code 参数不能为空"}

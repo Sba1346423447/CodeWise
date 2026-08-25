@@ -33,7 +33,6 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
     // 完整堆栈走控制台，前端用户只看到简洁提示
-    // eslint-disable-next-line no-console
     console.error("[ErrorBoundary] 子树渲染异常：", error, info.componentStack);
   }
 
