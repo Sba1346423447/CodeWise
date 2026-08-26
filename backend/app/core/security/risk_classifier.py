@@ -10,6 +10,7 @@
 - 输出 JSON 从响应文本中宽容提取（兼容裸 JSON / 代码块包裹两种形态）
 """
 
+import asyncio
 import json
 import re
 from pathlib import Path
@@ -22,6 +23,10 @@ from ...llm.config import config as llm_config
 from ...utils.logger import get_logger
 
 logger = get_logger("core.security.risk_classifier")
+
+# 风险分类超时（秒）：单 JSON 判定受控输出本应很快，超时保守降级为 confirm，
+# 不白等全局超时，且不因分类器卡死而放行或阻塞
+_RISK_TIMEOUT = 40.0
 
 # 风险等级（与前端确认对话框 / 简历叙事中的三级判定对齐）
 RISK_SAFE = "safe"        # 常规编程任务，直接放行
@@ -102,11 +107,18 @@ async def classify_tool_call(
     prompt = template.format(
         task_desc=task_desc[:500], tool_name=tool_name, tool_args=args_text
     )
-    response = await client.chat_or_none(
-        messages=[{"role": "system", "content": prompt}],
-        # 风险分类是受控输出角色（单 JSON 判定），优先用轻量模型提速
-        model=llm_config.fast_model or model or None,
-    )
+    try:
+        response = await asyncio.wait_for(
+            client.chat_or_none(
+                messages=[{"role": "system", "content": prompt}],
+                # 风险分类是受控输出角色（单 JSON 判定），优先用轻量模型提速
+                model=llm_config.fast_model or model or None,
+            ),
+            timeout=_RISK_TIMEOUT,
+        )
+    except TimeoutError:
+        logger.warning("风险分类调用超时（>{}s），保守降级为需确认 | 工具={}", _RISK_TIMEOUT, tool_name)
+        return {"risk": RISK_CONFIRM, "reason": "风险分类超时，需人工确认"}
     content = (response.choices[0].message.content or "") if response else ""
     verdict = _parse_risk(content)
     if verdict is None:

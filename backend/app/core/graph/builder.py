@@ -31,6 +31,7 @@ from .edges import (
     route_after_code_review,
     route_after_confirm,
     route_after_react,
+    route_after_refine,
     route_after_reflect,
     route_after_review,
     route_after_test,
@@ -150,9 +151,16 @@ def build_agent_graph():
     # reflect_node 出口：条件路由（通过/超限/失效 → 收尾，否则 → refine）
     graph.add_conditional_edges("reflect_node", route_after_reflect)
 
-    # refine_node 重写后先过代码安全审查再重新验证（refine 可能引入危险模式），
-    # 形成"重写 → 审查 → 测试 → 反思"自纠正闭环
-    graph.add_edge("refine_node", "code_review_node")
+    # refine_node 出口：条件路由（产出新代码 → 安全审查闭环；未产出 → 直接收尾，
+    # 代码未变时后续节点全为同输入重复调用，见 route_after_refine 注释）
+    graph.add_conditional_edges(
+        "refine_node",
+        route_after_refine,
+        {
+            "code_review_node": "code_review_node",
+            "finalize_node": "finalize_node",
+        },
+    )
 
     # 最终交付：保证 final_code 非空后结束
     graph.add_edge("finalize_node", END)

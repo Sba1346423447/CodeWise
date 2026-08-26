@@ -11,6 +11,7 @@ from app.core.graph.edges import (
     route_after_code_review,
     route_after_confirm,
     route_after_react,
+    route_after_refine,
     route_after_reflect,
     route_after_review,
     route_after_test,
@@ -164,6 +165,17 @@ class TestRouteAfterReflect:
     def test_未通过且有预算_进入优化(self):
         state = AgentState(tests_passed=False, reflection_count=0)
         assert route_after_reflect(state) == "refine_node"
+
+
+class TestRouteAfterRefine:
+    def test_未产出新代码_直接收尾(self):
+        # refine 超时/失败保留原代码：同输入重复走审查测试反思是纯浪费
+        state = AgentState(refine_no_progress=True)
+        assert route_after_refine(state) == "finalize_node"
+
+    def test_产出新代码_进安全审查闭环(self):
+        state = AgentState(refine_no_progress=False)
+        assert route_after_refine(state) == "code_review_node"
 
 
 if __name__ == "__main__":

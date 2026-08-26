@@ -1,5 +1,6 @@
 """图节点关键函数测试：代码提取、JSON 截断兜底与代码安全审查节点（不触发真实 LLM）。"""
 
+import asyncio
 import json
 
 import pytest
@@ -289,6 +290,18 @@ class TestTestNodeBrokenSplit:
         assert update["tests_passed"] is False
 
     @pytest.mark.asyncio
+    async def test_外部依赖失败_标记test_broken(self, monkeypatch):
+        # 测试执行了但失败源于真实调用 LLM（未 mock）：连接/认证类错误特征
+        def fake_execute(self, code, test_code):
+            return {"success": False, "passed": 0, "failed": 1, "errors": 0,
+                    "output": "ConnectionError: api_key not configured"}
+
+        monkeypatch.setattr(graph_nodes.TestRunner, "execute", fake_execute)
+        update = await graph_nodes.test_node(self._state("def test_x():\n    pass\n"))
+        assert update["test_broken"] is True
+        assert update["tests_passed"] is False
+
+    @pytest.mark.asyncio
     async def test_通过_不标记且更新快照(self, monkeypatch):
         def fake_execute(self, code, test_code):
             return {"success": True, "passed": 2, "failed": 0, "errors": 0,
@@ -328,6 +341,47 @@ class TestFinalSummaryProductized:
         assert "调试建议" in captured["prompt"]
         # 反思轮次等内部信息不再注入 prompt
         assert "优化轮次" not in captured["prompt"]
+
+
+class TestTestGenSimple:
+    """测试生成（简化模板直出）：单次调用 + 超时降级，不再走复杂模板白等。"""
+
+    @pytest.mark.asyncio
+    async def test_简化模板直接生成(self, monkeypatch):
+        # 复杂模板已砍除（实测 0% 成功率）：单次简化模板调用即返回
+        class FakeMsg:
+            class message:
+                content = "```python\ndef test_x():\n    assert True\n```"
+
+        class FakeResp:
+            choices = [FakeMsg()]
+
+        calls = []
+
+        async def fake_chat(messages, model=None, **kwargs):
+            calls.append(messages[0]["content"])
+            return FakeResp()
+
+        monkeypatch.setattr(graph_nodes.client, "chat_or_none", fake_chat)
+        result = await graph_nodes._generate_test_code_simple(
+            "def add(a,b):\n    return a+b\n", model="")
+        assert "def test_x()" in result
+        # 只调用一次且用的是简化模板
+        assert len(calls) == 1
+        assert "极简" in calls[0]
+
+    @pytest.mark.asyncio
+    async def test_简化模板超时返回空(self, monkeypatch):
+        # 超时返回空串，由调用点冒烟测试兜底，不白等
+        async def fake_chat(messages, model=None, **kwargs):
+            await asyncio.sleep(5)
+            return None
+
+        monkeypatch.setattr(graph_nodes, "_TEST_GEN_TIMEOUT", 0.1)
+        monkeypatch.setattr(graph_nodes.client, "chat_or_none", fake_chat)
+        result = await graph_nodes._generate_test_code_simple(
+            "def add(a,b):\n    return a+b\n", model="")
+        assert result == ""
 
 
 if __name__ == "__main__":

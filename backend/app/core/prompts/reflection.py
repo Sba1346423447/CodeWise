@@ -38,6 +38,12 @@ def _format_test_results(test_results: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# 反思注入的代码长度上限：超长代码全量注入是 reflect LLM 超时的主因之一
+# （实测 3291 字符 ~40s 可出，6258 字符 60s 超时）。截断头部保留结构定义，
+# 失败详情（traceback 指明位置）由测试结果段独立提供，定位不受截断影响
+_REFLECT_CODE_LIMIT = 4000
+
+
 def build_reflection_prompt(
     code: str,
     round_index: int = 1,
@@ -60,6 +66,12 @@ def build_reflection_prompt(
         sections.append(f"## 测试验证结果（客观事实，务必以此为准）\n{failure_text}")
 
     if code.strip():
+        if len(code) > _REFLECT_CODE_LIMIT:
+            code = (
+                code[:_REFLECT_CODE_LIMIT]
+                + f"\n# ... [代码过长已截断，原文共 {len(code)} 字符，"
+                "结合上方测试失败详情定位问题] ..."
+            )
         sections.append(f"## 待审查代码（第 {round_index} 轮）\n```python\n{code}\n```")
 
     output_format = templates.get("output_format", "").strip()

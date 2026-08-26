@@ -5,21 +5,36 @@
 超限时的摘要压缩（LLM 不可用时降级为硬截断）。
 """
 
+import asyncio
 
 from ..llm.client import client
 from ..utils.logger import get_logger
 
 logger = get_logger("memory.conversation")
 
+# 压缩调用超时（秒）：压缩本应很快，超时即降级硬截断，不白等全局超时
+_COMPRESS_TIMEOUT = 40.0
+
 # 上下文消息数上限：超过后触发摘要压缩（与原 max_messages 默认值对齐）
 _CONTEXT_MAX_MESSAGES = 20
 
-# 摘要提示词：提炼"需求演进 / 已定决策 / 未解决问题"，供后续轮次作为上下文基底
+# 摘要提示词：按固定结构提炼"需求演进 / 已定决策 / 未决问题"，供后续轮次作上下文基底。
+# 固定结构保证摘要语义收敛（避免每轮自由发挥导致重点漂移），且可被解析校验
 _COMPRESS_PROMPT = (
-    "你是对话摘要器。请把以下多轮对话压缩成一段简洁的中文摘要（200 字以内），"
-    "重点保留：用户的核心需求、需求的变化过程、已确定的方案与决策、尚未解决的问题。"
-    "直接输出摘要正文，不要任何解释或前缀。\n\n对话内容：{content}"
+    '你是对话摘要器。请把以下多轮对话按固定结构压缩成中文摘要，'
+    '只输出三行、行首带"需求：" / "已定决策：" / "未决问题："标签，不要任何其他文字。\n'
+    "需求：\n已定决策：\n未决问题：\n\n对话内容：{content}"
 )
+
+# 三字段标签（用于校验 LLM 摘要是否合规；缺任一行即视为坏摘要）
+_SUMMARY_LABELS = ("需求：", "已定决策：", "未决问题：")
+
+
+def _parse_summary(content: str) -> str:
+    """按三字段结构校验摘要；缺任一个标签视为坏摘要，返回空串触发降级。"""
+    if all(label in content for label in _SUMMARY_LABELS):
+        return content.strip()
+    return ""
 
 
 async def compress_messages(
@@ -42,11 +57,16 @@ async def compress_messages(
 
     summary = ""
     try:
-        response = await client.chat_or_none(
-            messages=[{"role": "system", "content": _COMPRESS_PROMPT.format(content=text)}],
-            model=model or None,
+        response = await asyncio.wait_for(
+            client.chat_or_none(
+                messages=[{"role": "system", "content": _COMPRESS_PROMPT.format(content=text)}],
+                model=model or None,
+            ),
+            timeout=_COMPRESS_TIMEOUT,
         )
-        summary = (response.choices[0].message.content or "").strip() if response else ""
+        summary = _parse_summary((response.choices[0].message.content or "") if response else "")
+    except TimeoutError:
+        logger.warning("摘要压缩调用超时（>{}s），降级为硬截断", _COMPRESS_TIMEOUT)
     except Exception as exc:
         logger.warning("摘要压缩调用异常，降级为硬截断 | 错误={}", exc)
 

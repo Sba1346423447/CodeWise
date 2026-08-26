@@ -49,9 +49,6 @@ MAX_REACT_ITERATIONS = int(os.getenv("MAX_REACT_ITERATIONS", "4"))
 # 连续工具失败上限：达到后强制跳出 ReAct 循环进入测试链路（不再纠缠工具）
 MAX_CONSECUTIVE_TOOL_FAILURES = 2
 
-# 反思兜底文本前缀：与 nodes.py 的 reflect_node 兜底保持一致，用于判断反思是否产出有效意见
-_FALLBACK_CRITIQUE_PREFIX = "未通过：当前实现未通过"
-
 
 def _count_consecutive_tool_failures(messages: list[dict[str, Any]], limit: int) -> int:
     """从消息末尾向前统计连续工具失败次数，达到 limit 即返回 limit。
@@ -174,16 +171,25 @@ def route_after_test(state: AgentState) -> str:
 def route_after_reflect(state: AgentState) -> str:
     """reflect_node 之后路由：
     - 测试通过 → finalize_node（交付最终代码）
-    - 反思轮次超限 → finalize_node（交付当前实现 + 失败说明）
-    - 反思输出兜底文本且反思预算将尽 → finalize_node（避免无效 refine 空转）
+    - 反思轮次已达上限（本轮为第 MAX 轮）→ finalize_node（交付当前实现 + 失败说明）
     - 否则 → refine_node（按修复意见重写后重新验证）
     """
     if state.tests_passed:
         return "finalize_node"
-    if state.reflection_count >= MAX_REFLECTION_ROUNDS:
-        return "finalize_node"
-    # 反思 LLM 输出兜底文本 + 反思预算将耗尽：跳过 refine，直接收尾
-    if (state.critique.startswith(_FALLBACK_CRITIQUE_PREFIX)
-            and state.reflection_count + 1 >= MAX_REFLECTION_ROUNDS):
+    # count 为已完成的 refine 轮次，本轮 reflect 尚未计入；+1 即当前已发生的 reflect 轮数，
+    # 达到上限即收尾，确保总 reflect 次数恰为 MAX_REFLECTION_ROUNDS，不额外多跑一轮
+    if state.reflection_count + 1 >= MAX_REFLECTION_ROUNDS:
         return "finalize_node"
     return "refine_node"
+
+
+def route_after_refine(state: AgentState) -> str:
+    """refine_node 之后路由：
+    - 产出新代码 → code_review_node（重写后先过安全审查再重新验证）
+    - 未产出（LLM 超时/失败，代码未变）→ finalize_node 直接收尾：
+      代码不变意味着后续 review 指纹跳过、测试复用重跑必然同结果，
+      再走一轮 reflect 是同输入重复调用（LLM 无状态，同样超时），纯浪费
+    """
+    if state.refine_no_progress:
+        return "finalize_node"
+    return "code_review_node"

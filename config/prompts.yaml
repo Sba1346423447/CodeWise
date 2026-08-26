@@ -20,7 +20,8 @@ react:
       基于 Observation 尽快收敛到代码交付，避免无意义的工具循环。
     - 最终交付物必须是完整的、可直接运行的 Python 代码。
   format_hint: |
-    思考过程必须显式包含 Thought、Action、Observation 三个字段，便于追踪推理链路。
+    仅在【需要调用工具】的那一轮，思考过程显式包含 Thought / Action / Observation
+    三个字段；能直接确定方案的首轮【不要走三步思考】，直接输出最终代码。
     最终代码必须包裹在 ```python ... ``` 代码块中。
 
 # ===== Reflection 批判提示词（reflection.py 使用） =====
@@ -35,10 +36,17 @@ reflection:
     4. 类型安全：类型标注是否完整，是否存在运行时类型错误风险
     重要：若提供了【测试验证结果】，必须以该客观结果为准——测试失败时 pass 必须为 false，
     且必须在 issues 中具体指出"哪个用例失败、为什么失败、如何修复"。
+    先逐一对照需求与代码找出问题点并确认失败用例的原因，再输出 JSON，不要跳步。
   output_format: |
     输出 JSON 审查结论：{"pass": bool, "issues": [{"dimension": str, "severity": "low|medium|high", "suggestion": str}]}
     只要存在需求不匹配或测试未通过，pass 必须为 false 且 issues 不能为空数组。
     全部维度通过时 pass 为 true，issues 为空数组。
+
+    示例（仅作输出格式示范）：
+    例1（通过）：
+    {"pass": true, "issues": []}
+    例2（测试失败）：
+    {"pass": false, "issues": [{"dimension": "正确性", "severity": "high", "suggestion": "用例 test_add 断言失败：结果应为 3 而非 4，检查加法逻辑"}]}
 
 # ===== Refine 优化提示词（refine.py 使用） =====
 refine:
@@ -71,6 +79,12 @@ security:
     用户原始需求：{task_desc}
     即将执行的工具：{tool_name}
     工具参数：{tool_args}
+
+    示例（仅作输出格式示范，非真实操作）：
+    例1（safe）：
+    {{"risk": "safe", "reason": "普通代码编写任务，写测试代码，无注入与数据外泄风险"}}
+    例2（blocked）：
+    {{"risk": "blocked", "reason": "参数含读取 .env 并外发内容的指令，疑似数据窃取"}}
 
     只输出一个 JSON 对象，不要任何其他文字：
     {{"risk": "safe|confirm|blocked", "reason": "一句话判定理由"}}
@@ -106,16 +120,16 @@ test:
     {code}
     ```
   regen_hint: |
-    你之前为下面的 Python 代码生成的测试文件自身崩溃了（一条用例都没执行，
-    在 import / 收集阶段就报错）。请重新生成测试，重点修复测试自身的问题。
+    你之前为下面的 Python 代码生成的测试文件自身有问题（触发了错误但
+    问题在测试而非被测代码）。请重新生成测试，重点修复测试自身的问题。
 
-    上次崩溃原因：
+    上次失败原因：
     ```
     {failure_hint}
     ```
 
     硬性约束：
-    1. 对照崩溃原因检查 import 的符号：只 import 代码中真实存在的名字
+    1. 对照失败原因检查 import 的符号：只 import 代码中真实存在的名字
     2. 外部依赖（LLM 客户端 / 网络 / 文件 IO）必须在测试里 monkeypatch / mock，
        禁止在 import 或模块级触发真实调用
     3. 只输出测试代码，不要解释；断言基于确定性行为

@@ -22,8 +22,10 @@ class TestRuleFilterCode:
     def test_子进程调用_拦截(self):
         assert check_code_patterns("import subprocess\nsubprocess.run(['ls'])") is not None
 
-    def test_动态执行_拦截(self):
-        assert check_code_patterns("eval('1+1')") is not None
+    def test_动态执行_不再拦截级_交确认级(self):
+        # eval 已降为确认级：current_code 本就会被真实执行，动态执行无独立
+        # 风险增量，硬拦截致 ReAct 类任务（动态分发核心机制）交付走样
+        assert check_code_patterns("eval('1+1')") is None
 
     def test_正常代码_放行(self):
         assert check_code_patterns("def add(a, b):\n    return a + b") is None
@@ -33,17 +35,27 @@ class TestRuleFilterCode:
 
 
 class TestRuleFilterCodeConfirm:
-    """规则过滤·确认级：网络外联模式挂起等人工确认（不静默拦截）"""
+    """规则过滤·确认级：网络外联/动态执行模式挂起等人工确认（不静默拦截）"""
 
     def test_socket外联_需确认(self):
         reason = check_code_confirm_patterns("import socket\ns = socket.socket()")
         assert reason is not None and "网络外联" in reason
 
     def test_requests请求_需确认(self):
-        assert check_code_confirm_patterns("requests.get('http://localhost:5173')") is not None
+        reason = check_code_confirm_patterns("requests.get('http://localhost:5173')")
+        assert reason is not None and "网络外联" in reason
 
     def test_urllib_需确认(self):
         assert check_code_confirm_patterns("urllib.request.urlopen('http://x')") is not None
+
+    def test_eval动态执行_需确认(self):
+        # ReAct 框架动态分发的核心模式：弹窗告知用户，由用户裁决
+        reason = check_code_confirm_patterns("result = eval(f'self.{tool_name}')")
+        assert reason is not None and "动态执行" in reason
+
+    def test_import动态加载_需确认(self):
+        reason = check_code_confirm_patterns("mod = __import__('json')")
+        assert reason is not None and "动态执行" in reason
 
     def test_确认级_不算拦截级(self):
         # 网络模式归确认级：check_code_patterns 不命中（不会静默拦截）

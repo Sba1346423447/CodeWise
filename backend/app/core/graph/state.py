@@ -54,6 +54,9 @@ class AgentState(BaseModel):
     test_regen_count: int = 0
     # 测试自身崩溃标记（test_node 写入）：True 时路由回 test_gen_node 重生成测试
     test_broken: bool = False
+    # refine 未产出新代码标记（refine_node 写入）：LLM 超时/失败导致代码未变时为 True，
+    # 路由直接 finalize——同样的代码再走一轮 review/test/reflect 是同输入重复调用，纯浪费
+    refine_no_progress: bool = False
     # 最近一次测试的客观失败详情（断言错误/traceback，供 reflect_node 注入反思）
     test_results: dict[str, Any] = Field(default_factory=dict)
     # 最终交付附带说明（如兜底失败原因），finalize_node 写入，随 final_code 返回前端

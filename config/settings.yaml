@@ -5,7 +5,8 @@ llm:
   # 模型名称（须与 .env 中 LLM_MODEL 保持一致，.env 优先级更高）
   model: "deepseek-v4-flash-ga-260731"
   # 轻量模型：审查分类/测试生成/反思/总结等受控输出角色使用（省推理时间）。
-  # 留空回落主模型（行为兼容）；建议配置为同厂商的非推理快速模型
+  # 留空回落主模型（行为兼容）。
+  # 注意：doubao-seed 系为混合推理模型，轻量角色实测比主模型更慢，勿配（实测数据见 docs/工作记录）
   fast_model: ""
   # 采样温度：越低越稳定，越高越有创造力
   temperature: 0
@@ -38,22 +39,25 @@ repo_map:
 security:
   # 总开关：关闭后工具调用直接执行（等价于审查链路加入前的行为）
   enabled: true
-  # 第一层·规则过滤：拦截级危险代码模式（命令执行/动态执行，命中即拦截，
-  # 作用于 code_executor/test_runner 的 code 参数与代码主链路）
+  # 第一层·规则过滤：拦截级危险代码模式（命令执行，命中即拦截，
+  # 作用于 code_executor/test_runner 的 code 参数与代码主链路）。
+  # 注：eval/exec/__import__ 已降为确认级——current_code 本就会被真实执行，
+  # 动态执行无独立风险增量，硬拦截反致 ReAct 类任务（动态分发为核心机制）交付走样
   dangerous_code_patterns:
     - "os.system"
     - "os.popen"
     - "subprocess."
     - "shutil.rmtree"
-    - "eval("
-    - "exec("
-    - "__import__("
-  # 第一层·规则过滤：确认级代码模式（网络外联，可能有正当用途——如用户明确
-  # 要求发 HTTP 请求——命中后挂起等人工确认，而非静默拦截）
+  # 第一层·规则过滤：确认级代码模式（网络外联/动态执行，可能有正当用途——
+  # 如用户明确要求发 HTTP 请求、ReAct 框架的工具动态分发——命中后挂起
+  # 等人工确认，而非静默拦截）
   confirm_code_patterns:
     - "socket."
     - "requests."
     - "urllib."
+    - "eval("
+    - "exec("
+    - "__import__("
   # 第一层·规则过滤：敏感路径模式（作用于 file_editor 的 path 参数，防密钥/凭据文件读写）
   sensitive_path_patterns:
     - ".env"

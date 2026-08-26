@@ -59,17 +59,33 @@ async def test_compress_short_context_untouched(monkeypatch):
 
 
 async def test_compress_with_summary(monkeypatch):
-    """超上限且 LLM 可用：早期消息压成摘要 system 消息 + 保留尾部。"""
+    """超上限且 LLM 可用：早期消息压成结构化摘要 system 消息 + 保留尾部。"""
     response = MagicMock()
     response.choices = [MagicMock()]
-    response.choices[0].message.content = "用户要求实现快排并优化性能"
+    response.choices[0].message.content = (
+        "需求：实现快排\n已定决策：采用递归分治\n未决问题：边界输入待确认"
+    )
     monkeypatch.setattr(
         conversation.client, "chat_or_none", AsyncMock(return_value=response)
     )
     result = await conversation.compress_messages(_messages(40))
     assert result[0]["role"] == "system"
     assert "此前对话摘要" in result[0]["content"]
+    assert "需求：" in result[0]["content"]
     assert len(result) == 11  # 1 摘要 + 10 尾部保留
+
+
+async def test_compress_bad_summary_fallback(monkeypatch):
+    """LLM 输出不合三字段结构：视为坏摘要，降级硬截断（坏摘要不进上下文）。"""
+    response = MagicMock()
+    response.choices = [MagicMock()]
+    response.choices[0].message.content = "随意的自由文本，没有三字段标签"
+    monkeypatch.setattr(
+        conversation.client, "chat_or_none", AsyncMock(return_value=response)
+    )
+    result = await conversation.compress_messages(_messages(40))
+    assert len(result) == 20
+    assert result[-1]["content"] == "消息39"
 
 
 async def test_compress_fallback_to_truncation(monkeypatch):

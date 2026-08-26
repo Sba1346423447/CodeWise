@@ -5,7 +5,10 @@ import uuid
 
 import chromadb
 from chromadb.config import Settings
-from loguru import logger
+
+from ..utils.logger import get_logger
+
+logger = get_logger("memory.experience_store")
 
 # ChromaDB 独立服务地址，环境变量可覆盖（Docker 内为服务名 chromadb）
 _CHROMA_HOST = os.getenv("CHROMA_HOST", "localhost")

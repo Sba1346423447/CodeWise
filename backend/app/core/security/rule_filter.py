@@ -20,14 +20,21 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[4]
 _CONFIG_PATH = _PROJECT_ROOT / "config" / "settings.yaml"
 
 # 默认拦截级危险代码模式（settings.yaml 缺失/读取失败时的兜底）：
-# 命中即拦截（block），不允许通过任何链路
+# 命中即拦截（block），不允许通过任何链路。
+# 注：eval/exec/__import__ 已降为确认级——current_code 本就会被真实执行，
+# 动态执行无独立风险增量，硬拦截反致 ReAct 类任务（动态分发为核心机制）交付走样
 _DEFAULT_DANGEROUS_CODE = [
     "os.system", "os.popen", "subprocess.", "shutil.rmtree",
+]
+# 默认确认级代码模式：网络外联 + 动态执行。均可能有正当用途
+# （用户要求发 HTTP 请求 / ReAct 框架的工具动态分发），命中后挂起等
+# 人工确认（confirm），而非静默拦截
+_DEFAULT_CONFIRM_CODE = [
+    "socket.", "requests.", "urllib.",
     "eval(", "exec(", "__import__(",
 ]
-# 默认确认级代码模式：网络外联。可能有正当用途（如用户明确要求发 HTTP 请求），
-# 命中后挂起等人工确认（confirm），而非静默拦截
-_DEFAULT_CONFIRM_CODE = ["socket.", "requests.", "urllib."]
+# 网络外联类确认模式集合：与动态执行类区分弹窗文案（告知用户具体风险）
+_NETWORK_CONFIRM = {"socket.", "requests.", "urllib."}
 # 默认敏感路径模式：密钥 / 凭据 / 环境变量文件
 _DEFAULT_SENSITIVE_PATH = [".env", ".pem", ".key", "id_rsa", "secret", "credential", "token"]
 
@@ -68,21 +75,23 @@ def check_code_patterns(code: str) -> str | None:
         return None
     for pattern in DANGEROUS_CODE_PATTERNS:
         if pattern in code:
-            return f"代码包含危险模式：{pattern}（命令执行/动态执行类操作被禁止）"
+            return f"代码包含危险模式：{pattern}（命令执行类操作被禁止）"
     return None
 
 
 def check_code_confirm_patterns(code: str) -> str | None:
-    """扫描代码文本中的确认级模式（网络外联）；命中返回原因，未命中返回 None。
+    """扫描代码文本中的确认级模式（网络外联/动态执行）；命中返回原因，未命中返回 None。
 
-    命中后不拦截而是挂起等人工确认：网络请求可能有正当用途
-    （如用户明确要求"把代码发到某地址"），由用户最终裁决。
+    命中后不拦截而是挂起等人工确认：两类模式均可能有正当用途
+    （用户要求发 HTTP 请求 / ReAct 框架的工具动态分发），由用户最终裁决。
     """
     if not code:
         return None
     for pattern in CONFIRM_CODE_PATTERNS:
         if pattern in code:
-            return f"代码包含网络外联模式：{pattern}（将发起网络请求，需人工确认）"
+            if pattern in _NETWORK_CONFIRM:
+                return f"代码包含网络外联模式：{pattern}（将发起网络请求，需人工确认）"
+            return f"代码包含动态执行模式：{pattern}（可执行任意代码，需人工确认）"
     return None
 
 

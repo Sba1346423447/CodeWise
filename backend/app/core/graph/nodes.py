@@ -431,10 +431,10 @@ async def code_review_node(state: AgentState) -> dict[str, Any]:
 
     审查策略（与工具审查链路 review_node 对齐的三级结论）：
     - allow：无危险模式且风险分类为 safe → 放行进入测试链路，并记录代码指纹
-    - block：命中拦截级模式（命令执行/动态执行）或风险分类为 blocked →
+    - block：命中拦截级模式（命令执行）或风险分类为 blocked →
       清空 current_code 并回填拦截反馈消息，LLM 换方案重新生成
-    - confirm：命中确认级模式（网络外联）或风险分类为 confirm →
-      挂起等人工确认（用户可能确实要求代码发起网络请求）
+    - confirm：命中确认级模式（网络外联/动态执行）或风险分类为 confirm →
+      挂起等人工确认（用户可能确实要求代码发起网络请求/动态分发）
     - 指纹跳过：内容与已审查通过的代码一致（测试失败回环 refine 未改代码）→
       直接放行，避免同一份已批准代码反复弹窗
     """
@@ -451,10 +451,10 @@ async def code_review_node(state: AgentState) -> dict[str, Any]:
     if not SECURITY_ENABLED:
         return {"security_outcome": "allow", "security_decisions": {}}
 
-    # 第一层·拦截级：命令执行 / 动态执行，直接拦截并回填反馈让 LLM 换方案
+    # 第一层·拦截级：命令执行，直接拦截并回填反馈让 LLM 换方案
     block_reason = check_code_patterns(code)
     if not block_reason:
-        # 第一层·确认级：网络外联，挂起等人工确认（不静默拦截）
+        # 第一层·确认级：网络外联/动态执行，挂起等人工确认（不静默拦截）
         confirm_reason = check_code_confirm_patterns(code)
         if confirm_reason:
             logger.info("code_review_node 确认级命中 | 代码长度={}", len(code))
@@ -643,7 +643,7 @@ async def test_gen_node(state: AgentState) -> dict[str, Any]:
     if state.test_broken and state.test_regen_count < 1:
         logger.info("test_gen_node 重生成 | 测试自身崩溃，注入失败详情")
         test_code = await _generate_test_code(
-            code, model=state.model,
+            code, model=FAST_MODEL or "",
             failure_hint=state.test_results.get("output", "")[:800],
         )
         if test_code.strip():
@@ -657,7 +657,7 @@ async def test_gen_node(state: AgentState) -> dict[str, Any]:
         return {"test_code": "", "test_broken": False,
                 "test_regen_count": state.test_regen_count + 1}
 
-    test_code = await _generate_test_code_retry(code, model=state.model)
+    test_code = await _generate_test_code_simple(code, model=FAST_MODEL or "")
     if not test_code.strip():
         logger.warning("test_gen_node 失败 | 无法生成测试代码，将使用冒烟测试兜底")
         return {"test_code": "", "test_error": "无法生成测试代码"}
@@ -665,21 +665,59 @@ async def test_gen_node(state: AgentState) -> dict[str, Any]:
     return {"test_code": test_code}
 
 
-async def _generate_test_code_retry(code: str, model: str = "") -> str:
-    """生成测试代码，失败自动重试一次（LLM 偶发失败场景的简单容错）。
+# 测试生成超时（秒）：简化模板实测 1.8-5.2s 稳定出结果，超时即交由冒烟测试兜底。
+# 原复杂模板（多用例覆盖）实测 8/8 超时（deepseek/doubao 皆然），已砍除，
+# 不再为 0% 成功率的路径保留 20s 白等
+_TEST_GEN_TIMEOUT = 20.0
 
-    重试时使用简化提示词（只需一个 assert 的极简测试），降低 LLM 输出难度，
-    显著提高生成成功率，减少落入冒烟测试兜底的概率。
+# 结论型节点（reflect/refine/finalize 总结）LLM 超时（秒）：正常耗时实测 ≤45s，
+# 取其上限留余量，避免 LLM 偶发卡死时白等满全局超时（120s）后再降级
+_NODE_LLM_TIMEOUT = 60.0
+
+# 外部依赖失败特征：测试输出命中即判定"测试未 mock 外部依赖"（而非代码逻辑 bug），
+# 走测试重生成分流。真代码 bug 的报错类型是 assert/TypeError/NameError 等，
+# 连接/认证/限流类错误几乎必然源于真实调用了 LLM/网络服务
+_EXT_DEP_PATTERNS = re.compile(
+    r"ConnectionError|Connection refused|API key|api_key|AuthenticationError"
+    r"|Max retries exceeded|Rate limit|status.?code.?429",
+    re.IGNORECASE,
+)
+
+
+async def _chat_with_timeout(prompt: str, model: str, timeout: float = _NODE_LLM_TIMEOUT) -> Any:
+    """带超时兜底的 LLM 调用：超时返回 None（与 chat_or_none 失败返回值一致），
+    由调用点既有 None 降级逻辑接管，避免白等全局超时。任何返回都经 wrapper 包住。"""
+    try:
+        return await asyncio.wait_for(
+            client.chat_or_none(
+                messages=[{"role": "system", "content": prompt}],
+                model=model or None,
+            ),
+            timeout=timeout,
+        )
+    except TimeoutError:
+        logger.warning("节点 LLM 调用超时（>{}s），降级返回", timeout)
+        return None
+
+
+async def _generate_test_code_simple(code: str, model: str = "") -> str:
+    """用简化模板生成测试代码（一个 test_xxx + 基本 assert）。
+
+    直接走简化模板：复杂模板实测 0% 成功率（8/8 超时），首轮 20s 白等后
+    仍落回简化模板，砍除死路径。超时/失败返回空串，由冒烟测试兜底。
     """
-    first = await _generate_test_code(code, model=model)
-    if first.strip():
-        return first
-    logger.warning("test_gen_node 重试生成测试代码（简化提示词）")
     prompt = _load_test_templates().get("generate_simple", "").format(code=code)
-    response = await client.chat_or_none(
-        messages=[{"role": "system", "content": prompt}],
-        model=model or None,
-    )
+    try:
+        response = await asyncio.wait_for(
+            client.chat_or_none(
+                messages=[{"role": "system", "content": prompt}],
+                model=model or None,
+            ),
+            timeout=_TEST_GEN_TIMEOUT,
+        )
+    except TimeoutError:
+        logger.warning("test_gen_node 简化模板生成超时（>{}s），交由冒烟兜底", _TEST_GEN_TIMEOUT)
+        return ""
     return extract_code(response.choices[0].message.content or "") if response else ""
 
 
@@ -713,18 +751,29 @@ async def test_node(state: AgentState) -> dict[str, Any]:
                 result.get("failed", 0),
                 result.get("errors", 0))
 
-    # 测试自身崩溃分流（collection error）：一条用例都没执行（passed+failed==0
-    # 且 errors>0）说明测试文件在 import 阶段就崩了——问题在测试不在代码。
-    # 标记 test_broken 让路由回 test_gen_node 重生成测试（代码不动），
-    # 切断"坏测试 → 反思 → 改正确代码"的空转循环
-    test_broken = (
+    # 测试信号质量分流（Codex 式"验证是安全网"的前提是信号本身可信）：
+    # 问题在测试而非代码的两种情形，均标记 test_broken 让路由回 test_gen_node
+    # 重生成测试（代码不动），切断"坏信号 → 反思 → 改正确代码"的空转循环
+    output = result.get("output", "")
+    # 情形1 collection error：一条用例都没执行（passed+failed==0 且 errors>0）
+    # 说明测试文件在 import 阶段就崩了
+    collection_crash = (
         bool(test_code)
         and not passed
         and result.get("errors", 0) > 0
         and result.get("passed", 0) + result.get("failed", 0) == 0
     )
+    # 情形2 外部依赖失败：测试执行了但失败源于真实调用了 LLM/网络等外部服务
+    # （提示词已强制 mock 但 LLM 不总是遵守）。连接/认证/限流类错误几乎必然
+    # 是未 mock 外部依赖，而非代码逻辑 bug；误判（真 bug 报连接错）代价仅为
+    # 一次测试重生成，重生成后仍失败照常走 reflect，二次兜底成立
+    ext_dep_failure = (
+        bool(test_code) and not passed and bool(_EXT_DEP_PATTERNS.search(output))
+    )
+    test_broken = collection_crash or ext_dep_failure
     if test_broken:
-        logger.warning("test_node 测试自身崩溃 | 重生成测试（代码不动） 次数={}",
+        logger.warning("test_node 测试自身问题 | {} 重生成测试（代码不动） 次数={}",
+                       ("collection崩溃" if collection_crash else "外部依赖未mock"),
                        state.test_regen_count)
 
     update: dict[str, Any] = {
@@ -855,10 +904,7 @@ async def reflect_node(state: AgentState) -> dict[str, Any]:
         test_results=state.test_results,
     )
     # 容错调用：LLM 超时/失败返回 None，不中断整个 Agent 流程
-    response = await client.chat_or_none(
-        messages=[{"role": "system", "content": prompt}],
-        model=FAST_MODEL or state.model or None,
-    )
+    response = await _chat_with_timeout(prompt, FAST_MODEL or state.model or "")
     critique = (response.choices[0].message.content or "").strip() if response else ""
 
     # 硬约束：critique 不能为空。若 LLM 输出空白，用测试失败详情构造兜底批评，
@@ -896,10 +942,7 @@ async def refine_node(state: AgentState) -> dict[str, Any]:
         state.current_code, state.critique, task_desc=state.task_desc
     )
     # 容错调用：LLM 超时/失败返回 None，保留原代码（避免空/解释文字覆盖已有实现）
-    response = await client.chat_or_none(
-        messages=[{"role": "system", "content": prompt}],
-        model=state.model or None,
-    )
+    response = await _chat_with_timeout(prompt, state.model or "")
     new_code = extract_code(response.choices[0].message.content or "") if response else ""
 
     round_index = state.reflection_count + 1
@@ -909,6 +952,7 @@ async def refine_node(state: AgentState) -> dict[str, Any]:
             "current_code": new_code,
             "reflection_count": round_index,
             "critique": "",  # 消费后清空，防止重复优化
+            "refine_no_progress": False,
             # 测试保留复用：refine 已被约束"保持对外接口不变"，测试仍有效，
             # 直接重跑 pytest 省一次测试生成调用；若测试因此崩溃，
             # test_broken 分流会接管重生成
@@ -925,7 +969,7 @@ async def refine_node(state: AgentState) -> dict[str, Any]:
             ],
         }
     logger.warning("refine_node 未产出新代码 | 轮次={} 保留原代码", round_index)
-    return {"reflection_count": round_index, "critique": ""}
+    return {"reflection_count": round_index, "critique": "", "refine_no_progress": True}
 
 
 async def _build_final_summary(
@@ -953,10 +997,7 @@ async def _build_final_summary(
         f"验证是否通过：{'通过' if tests_passed else '未通过'}\n"
         f"最终代码：\n```python\n{final_code}\n```"
     )
-    response = await client.chat_or_none(
-        messages=[{"role": "system", "content": prompt}],
-        model=FAST_MODEL or model or None,
-    )
+    response = await _chat_with_timeout(prompt, FAST_MODEL or model or "")
     summary = (response.choices[0].message.content or "").strip() if response else ""
     return summary
 
