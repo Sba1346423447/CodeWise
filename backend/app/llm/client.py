@@ -6,6 +6,7 @@
 import time
 from collections.abc import AsyncIterator
 
+from langsmith import traceable
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletion
 
@@ -66,6 +67,7 @@ class LLMClient:
             kwargs["tools"] = tools
         return kwargs
 
+    @traceable(run_type="llm", name="llm_chat")
     async def chat(
         self,
         messages: list[dict],
@@ -115,6 +117,7 @@ class LLMClient:
             logger.warning("LLM 容错调用返回 None（已降级处理）| 消息数={}", len(messages))
             return None
 
+    @traceable(run_type="llm", name="llm_chat_stream")
     async def chat_stream(
         self,
         messages: list[dict],
