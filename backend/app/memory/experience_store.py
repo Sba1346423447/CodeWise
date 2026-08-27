@@ -5,6 +5,7 @@ import uuid
 
 import chromadb
 from chromadb.config import Settings
+from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
 
 from ..utils.logger import get_logger
 
@@ -15,8 +16,16 @@ _CHROMA_HOST = os.getenv("CHROMA_HOST", "localhost")
 _CHROMA_PORT = int(os.getenv("CHROMA_PORT", "8000"))
 # 连接/读取超时（秒）：服务不可达时快速失败降级，避免阻塞后端启动
 _CHROMA_TIMEOUT = 2
-# 经验集合名称
-_COLLECTION_NAME = "experiences"
+# 经验集合名称。后缀 _bge 区分本地 BGE 向量化：此前用默认 embedding 创建的
+# 「experiences」集合已持久化 384 维默认配置，与本库重名会报 embedding 冲突；
+# 独立集合名可自然隔离、且未来换 embedding 只需换名，避免污染。
+_COLLECTION_NAME = "experiences_bge"
+# 本地 embedding 模型路径：ChromaDB 默认的 ONNX(all-MiniLM) 首次需联网下载 79MB，
+# 网络差时写入/召回会长期卡死。改用本地已下载的 BGE 模型离线向量化（中英文更准）。
+# 环境变量可覆盖（如切到 docker 内置模型时置空以回落默认行为）
+_EMBEDDING_MODEL_PATH = os.getenv(
+    "EMBEDDING_MODEL_PATH", r"D:\Langchain\models\bge-small-zh-v1.5"
+)
 
 
 class ExperienceStore:
@@ -41,6 +50,11 @@ class ExperienceStore:
             self._collection = client.get_or_create_collection(
                 name=_COLLECTION_NAME,
                 metadata={"hnsw:space": "cosine"},
+                # 官方内置 embedding：传本地模型路径即离线加载（本地目录存在不会联网，
+                # 规避默认 ONNX 首次联网下载卡死）；文档/查询返回形态由官方处理
+                embedding_function=SentenceTransformerEmbeddingFunction(
+                    model_name=_EMBEDDING_MODEL_PATH,
+                ),
             )
         except Exception as exc:
             logger.warning(f"ChromaDB 连接失败（{host}:{port}），经验库降级为空：{exc}")

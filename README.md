@@ -114,11 +114,17 @@ npm install
 
 ### 4. 可选：启动 ChromaDB（启用长期经验库）
 
+本地开发（不用 Docker，随 `make dev` 自动拉起）：
 ```bash
-docker run -d -p 8001:8000 chromadb/chroma
+make dev   # 已在 dev 前自动拉起本地 Chroma (localhost:8000)
+make chroma-down   # 手动停止本地 Chroma
+```
+或使用 Docker 方式：
+```bash
+docker run -d -p 8000:8000 chromadb/chroma
 ```
 
-未启动时经验库自动降级为空库，不影响对话与代码生成主流程。
+后端默认连 `localhost:8000`（环境变量 `CHROMA_HOST` / `CHROMA_PORT` 可覆盖）。未启动时经验库自动降级为空库，不影响对话与代码生成主流程。
 
 ---
 
