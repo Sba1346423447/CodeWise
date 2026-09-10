@@ -1,173 +1,98 @@
-"""图构建器：组装 StateGraph，注册节点与边，编译为可执行的 Agent 图。
+"""图构建器：组装多 Agent 主图（Supervisor 编排 + 三子图），编译为可执行 Agent 图。
 
-依赖：langgraph.graph（StateGraph / START / END）、langgraph.checkpoint.memory
-（InMemorySaver）；节点与边定义见同目录 nodes.py / edges.py。
-新拓扑（生成 → 审查 → 测试 → 反思 → 优化 → 交付）：
-- START → react_node：ReAct 生成起点
-- react_node → review_node / code_review_node / test_gen_node：有工具调用先过工具
-  安全审查，已产出代码先过代码安全审查（test_node 会真实执行），均无则收尾
-- review_node → tool_node / confirm_node / react_node：审查放行执行 / 挂起确认 / 拦截重决策
-- confirm_node → tool_node / react_node：人工批准执行 / 拒绝换方案
-- code_review_node → test_gen_node / code_confirm_node / react_node：代码审查放行 / 挂起确认 / 拦截重生成
-- code_confirm_node → test_gen_node / react_node：人工批准执行 / 拒绝换方案
-- tool_node → react_node：闭合 ReAct 循环
-- test_gen_node → test_node：生成测试后强制真实 pytest
-- test_node → finalize_node / test_gen_node / reflect_node：测试通过直接交付 /
-  测试自身崩溃回炉重生成（代码不动）/ 真实失败进入反思
-- reflect_node → finalize_node / refine_node：通过或超限收尾，否则优化重写
-- refine_node → code_review_node：代码已变，先过安全审查再重新生成测试验证
+多 Agent 改造（任务 1.2 + 1.3 + 1.4 + 1.5）：旧 11 节点扁平图重组为
+「Supervisor 编排节点 + Coder / Reviewer / Tester 三子图 + 编排层节点」：
+- Supervisor（supervisor.py）：集中路由决策——Command(goto=...) 动态派发，
+  确定性规则（复用 edges.py 既有判定），取代 4 组静态条件边
+- Coder 子图（subgraphs/coder.py，独立编译）：react / review / confirm /
+  tool / refine——ReAct 决策循环与重写链路整体迁移，节点函数零改动
+- Reviewer 子图（subgraphs/reviewer.py，独立编译）：code_review /
+  code_confirm——代码产物三层审查 + Human Gate（interrupt 在子图内挂起，
+  恢复后从子图断点继续）
+- Tester 子图（subgraphs/tester.py，独立编译）：test_gen / test——
+  pytest 沙箱执行与判定，坏测试回炉重生成循环封闭在子图内
+- 编排层节点：reflect（反思）/ finalize（交付 + best_code 快照回退）
+
+主图拓扑（Supervisor 集中编排）：
+- START → supervisor：任务入口（stage 空 → 派发 coder 生成模式）
+- coder / reviewer / tester / reflect_node 完成后 → 全部回到 supervisor
+  （各阶段判定由 supervisor 按 stage 选择等价 route 函数，见 supervisor.py）
+- supervisor → Command(goto=...)：coder / reviewer / tester / reflect_node /
+  finalize_node（goto 目标均已注册）
 - finalize_node → END：保证有交付物后结束
 
-checkpointer：confirm_node / code_confirm_node 的 interrupt 挂起依赖 checkpoint
-保存线程状态，用户批准/拒绝后以 Command(resume=...) 恢复同一线程。单用户场景用
-InMemorySaver（零外部依赖）；多用户持久化可平滑替换为 SqliteSaver / PostgresSaver。
+state 分层（OrchestrationState 继承 AgentState）：
+- messages / reflections 主图用覆盖 reducer：子图（append reducer）内部
+  累积全量后回传，主图覆盖接收，避免子图全量回传叠加重复
+  （langgraph 1.2.7 实测：子图作为节点会回传子图最终 state 全量）
+- stage：supervisor 派发目标记录，集中路由的来源消歧依据
+- 其余字段覆盖语义（LastValue），子图注入/回传天然一致；
+  reflection_count（全局反思计数）与 best_code（最优快照）由主图
+  state 单点持有，supervisor / finalize 判定直接读写
+
+checkpointer：Coder 子图 confirm_node 与 Reviewer 子图 code_confirm_node
+的 interrupt 挂起依赖 checkpoint 保存线程状态；子图内 interrupt 沿子图
+传播至主图执行流，挂起与恢复（Command(resume=...)）由主图 checkpointer
+持久化，恢复时从子图内部断点继续、子图 END 后经静态边回 supervisor，
+与 Command(goto) 动态路由兼容（resume 与 goto 作用于不同层级）。
+- 默认 InMemorySaver（测试 / 无 DB 环境零依赖，重启丢状态）
+- 生产持久化：main.py lifespan 按 settings.yaml agent.checkpointer=mysql
+  创建 AIOMySQLSaver（见 checkpoint.py）并以 build_agent_graph(saver)
+  重建单例——重启后同 thread_id 从断点继续（改造三 3.1）
 """
 
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
-from .edges import (
-    route_after_code_confirm,
-    route_after_code_review,
-    route_after_confirm,
-    route_after_react,
-    route_after_refine,
-    route_after_reflect,
-    route_after_review,
-    route_after_test,
-)
 from .nodes import (
-    code_confirm_node,
-    code_review_node,
-    confirm_node,
     finalize_node,
-    react_node,
-    refine_node,
     reflect_node,
-    review_node,
-    test_gen_node,
-    test_node,
-    tool_node,
 )
-from .state import AgentState
+from .state import OrchestrationState
+from .subgraphs.coder import build_coder_subgraph
+from .subgraphs.reviewer import build_reviewer_subgraph
+from .subgraphs.tester import build_tester_subgraph
+from .supervisor import supervisor_node
 
 
-def build_agent_graph():
-    """组装并编译 Agent 图，返回可执行图（LangGraph CompiledGraph）。"""
-    graph = StateGraph(AgentState)
+def build_agent_graph(checkpointer=None):
+    """组装并编译 Agent 主图，返回可执行图（LangGraph CompiledGraph）。
 
-    # 注册节点
-    graph.add_node("react_node", react_node)
-    graph.add_node("review_node", review_node)
-    graph.add_node("confirm_node", confirm_node)
-    graph.add_node("code_review_node", code_review_node)
-    graph.add_node("code_confirm_node", code_confirm_node)
-    graph.add_node("tool_node", tool_node)
-    graph.add_node("test_gen_node", test_gen_node)
-    graph.add_node("test_node", test_node)
-    graph.add_node("reflect_node", reflect_node)
-    graph.add_node("refine_node", refine_node)
-    graph.add_node("finalize_node", finalize_node)
+    checkpointer：None 时默认 InMemorySaver；生产持久化由 main.py lifespan
+    传入 AIOMySQLSaver（见 checkpoint.py）后重建单例。
+    """
+    graph = StateGraph(OrchestrationState)
 
-    # 入口：START → react_node（ReAct 生成起点）
-    graph.add_edge(START, "react_node")
+    # 注册节点：coder / reviewer / tester 为独立编译的子图，
+    # supervisor 为编排决策节点，reflect / finalize 为编排层节点。
+    # input_schema 显式指定 OrchestrationState：节点函数注解保持 AgentState
+    # 不动（测试兼容），主图按 OrchestrationState（messages/reflections
+    # 覆盖语义 + stage）注册 channel，避免子图全量回传时 append 叠加重复
+    graph.add_node("supervisor", supervisor_node, input_schema=OrchestrationState)
+    graph.add_node("coder", build_coder_subgraph())
+    graph.add_node("reviewer", build_reviewer_subgraph())
+    graph.add_node("tester", build_tester_subgraph())
+    graph.add_node("reflect_node", reflect_node, input_schema=OrchestrationState)
+    graph.add_node("finalize_node", finalize_node, input_schema=OrchestrationState)
 
-    # react_node 出口：条件路由（通用问答直接交付 / 有代码先过代码审查 /
-    # 有工具先过工具审查 / 否则收尾）
-    # 显式 path map：LangGraph 依据返回值映射到已注册节点
-    graph.add_conditional_edges(
-        "react_node",
-        route_after_react,
-        {
-            "review_node": "review_node",
-            "code_review_node": "code_review_node",
-            "test_gen_node": "test_gen_node",
-            "finalize_node": "finalize_node",
-        },
-    )
+    # 入口：START → supervisor（初始派发 coder 生成模式）
+    graph.add_edge(START, "supervisor")
 
-    # review_node 出口：按审查结论分发（放行执行 / 挂起人工确认 / 拦截回决策）
-    graph.add_conditional_edges(
-        "review_node",
-        route_after_review,
-        {
-            "tool_node": "tool_node",
-            "confirm_node": "confirm_node",
-            "react_node": "react_node",
-        },
-    )
+    # 各节点完成后统一回 supervisor 集中决策
+    # （旧 4 组静态条件边的判定全部收拢进 supervisor_node，按 stage 分发）
+    graph.add_edge("coder", "supervisor")
+    graph.add_edge("reviewer", "supervisor")
+    graph.add_edge("tester", "supervisor")
+    graph.add_edge("reflect_node", "supervisor")
 
-    # confirm_node 出口：按人工确认结果分发（批准执行 / 拒绝回决策）
-    graph.add_conditional_edges(
-        "confirm_node",
-        route_after_confirm,
-        {
-            "tool_node": "tool_node",
-            "react_node": "react_node",
-        },
-    )
-
-    # code_review_node 出口：按代码审查结论分发（放行进测试 / 挂起确认 / 拦截重生成）
-    graph.add_conditional_edges(
-        "code_review_node",
-        route_after_code_review,
-        {
-            "test_gen_node": "test_gen_node",
-            "code_confirm_node": "code_confirm_node",
-            "react_node": "react_node",
-        },
-    )
-
-    # code_confirm_node 出口：按人工确认结果分发（批准进测试 / 拒绝回决策）
-    graph.add_conditional_edges(
-        "code_confirm_node",
-        route_after_code_confirm,
-        {
-            "test_gen_node": "test_gen_node",
-            "react_node": "react_node",
-        },
-    )
-
-    # tool_node 执行完工具后回到 LLM 决策，闭合 ReAct 循环
-    graph.add_edge("tool_node", "react_node")
-
-    # 测试链路：生成测试 → 真实执行
-    graph.add_edge("test_gen_node", "test_node")
-
-    # 测试出口条件路由（Codex 式：通过即交付，坏测试修测试，真实失败才反思）：
-    # - 通过 → finalize_node（跳过反思，省一次 LLM 调用）
-    # - 测试自身崩溃且未超重生成上限 → test_gen_node（重生成测试，代码不动）
-    # - 真实失败 → reflect_node（失败详情注入，反思基于客观事实）
-    graph.add_conditional_edges(
-        "test_node",
-        route_after_test,
-        {
-            "finalize_node": "finalize_node",
-            "test_gen_node": "test_gen_node",
-            "reflect_node": "reflect_node",
-        },
-    )
-
-    # reflect_node 出口：条件路由（通过/超限/失效 → 收尾，否则 → refine）
-    graph.add_conditional_edges("reflect_node", route_after_reflect)
-
-    # refine_node 出口：条件路由（产出新代码 → 安全审查闭环；未产出 → 直接收尾，
-    # 代码未变时后续节点全为同输入重复调用，见 route_after_refine 注释）
-    graph.add_conditional_edges(
-        "refine_node",
-        route_after_refine,
-        {
-            "code_review_node": "code_review_node",
-            "finalize_node": "finalize_node",
-        },
-    )
+    # supervisor 出口由 Command(goto=...) 动态派发（无需静态出边）
 
     # 最终交付：保证 final_code 非空后结束
     graph.add_edge("finalize_node", END)
 
     # checkpointer：支撑 confirm_node / code_confirm_node 的 interrupt 挂起与
-    # Command(resume) 恢复
-    return graph.compile(checkpointer=InMemorySaver())
+    # Command(resume) 恢复（含子图内部断点）；None 默认内存版（重启丢状态）
+    return graph.compile(checkpointer=checkpointer or InMemorySaver())
 
 
 # 模块级单例：全应用共享编译后的 Agent 图

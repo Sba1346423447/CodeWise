@@ -83,3 +83,37 @@ class AgentState(BaseModel):
     # 测试失败回环（refine 未改动代码）再次进入代码审查时凭指纹跳过，
     # 避免同一份已批准代码反复弹窗；代码内容一变指纹即失配，重新走完整审查
     reviewed_code_hash: str = ""
+
+
+def _replace_items(left: list[dict], right: list[dict]) -> list[dict]:
+    """列表覆盖 reducer：新值直接替换旧值（LastValue 语义）。
+
+    专用于主图（编排层）持有 messages / reflections：子图（append reducer）
+    内部累积出全量后回传，主图以覆盖语义接收，避免"子图全量回传 +
+    主图追加"导致的消息重复叠加（实测 langgraph 1.2.7 子图作为节点时
+    会将子图最终 state 全量回传父图）。
+    """
+    return right
+
+
+class OrchestrationState(AgentState):
+    """主图（编排层）状态：字段继承 AgentState，仅 messages / reflections
+    改为覆盖语义。
+
+    设计说明（多 Agent 改造任务 1.2）：
+    - 子图（CoderState 即 AgentState）内部用追加 reducer 维持 ReAct 循环累积；
+    - 子图作为节点执行结束时回传全量，主图覆盖接收，最终 state 与单 Agent
+      时代完全一致（迁移等价）；
+    - 主图节点（test/reflect/finalize/code_review 等）不追加 messages，
+      仅子图回传覆盖，语义不变；reflections 由 reflect_node 返回单条覆盖，
+      state 级累积历史不再保留（无消费者，SSE 摘要走节点 update 增量，不受影响）。
+    - stage（任务 1.5）：supervisor 上次派发的目标节点名。静态条件边时代
+      "哪条边触发"天然携带来源上下文；集中路由后由该字段显式记录，
+      supervisor 凭它选择等价的判定分支，无歧义。
+    """
+
+    messages: Annotated[list[dict[str, Any]], _replace_items] = Field(default_factory=list)
+    reflections: Annotated[list[dict[str, Any]], _replace_items] = Field(default_factory=list)
+    # 编排层路由阶段标记：supervisor 派发时写入（Command.update），
+    # 值为派发目标节点名（coder/reviewer/tester/reflect/finalize）
+    stage: str = ""

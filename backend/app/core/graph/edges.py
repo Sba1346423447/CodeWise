@@ -1,19 +1,18 @@
-"""条件边逻辑：根据工具调用 / 代码产出 / 测试结果 / 反思轮次路由节点流转。
+"""条件边判定逻辑：根据工具调用 / 代码产出 / 测试结果 / 反思轮次给出路由结论。
 
 依赖：langgraph.graph（END 常量）、pyyaml（读取 settings.yaml 反思轮次上限）。
-新拓扑（生成 → 审查 → 测试 → 反思 → 优化 → 交付）：
-- react_node → review_node（有工具调用，先过安全审查）/ code_review_node（已产出代码，
-  代码也要过安全审查——test_node 会真实执行）/ test_gen_node（无代码收尾）
-- review_node → tool_node（allow）/ confirm_node（confirm）/ react_node（block，拦截消息已回填）
-- confirm_node → tool_node（用户批准）/ react_node（用户拒绝，拒绝消息已回填）
-- code_review_node → test_gen_node（allow）/ code_confirm_node（confirm）/ react_node（block）
-- code_confirm_node → test_gen_node（用户批准）/ react_node（用户拒绝，拒绝消息已回填）
-- tool_node → react_node（闭合 ReAct 循环）
-- test_gen_node → test_node
-- test_node → reflect_node（无论通过与否都进入反思收尾）
-- reflect_node → finalize_node（测试通过 / 反思轮次超限 / 反思失效）或 refine_node
-- refine_node → code_review_node（代码已变，先过安全审查再重新生成测试验证）
-- finalize_node → END
+多 Agent 拓扑（任务 1.5：Supervisor 集中编排）：主图无静态条件边，
+各判定函数由 supervisor.py 按 stage 复用，结论经 _GOTO_MAP 映射为
+Command(goto=...) 派发；子图内部（coder/tester/reviewer）仍用
+add_conditional_edges 消费同批判定函数。
+
+判定函数归属：
+- route_after_react / route_after_review / route_after_confirm：
+  Coder 子图内部（react ⇄ review/tool ReAct 循环）
+- route_after_test：Tester 子图内部（坏测试回炉）+ supervisor（tester 出口）
+- route_after_code_review：Reviewer 子图内部（confirm 链路）
+- route_after_coder / route_after_reviewer / route_after_tester /
+  route_after_reflect：supervisor 决策（主图各阶段出口）
 """
 
 import json
@@ -23,7 +22,7 @@ from typing import Any
 
 import yaml
 
-from .state import AgentState
+from .state import AgentState, OrchestrationState
 
 # 项目根：edges -> graph -> core -> app -> backend -> 根
 _PROJECT_ROOT = Path(__file__).resolve().parents[4]
@@ -130,11 +129,15 @@ def route_after_confirm(state: AgentState) -> str:
     return "react_node"
 
 
-def route_after_code_review(state: AgentState) -> str:
+def route_after_code_review(state: OrchestrationState) -> str:
     """code_review_node 之后路由（按代码审查结论分发）：
     - allow（安全）→ test_gen_node 生成测试进入验证链路
     - confirm（网络外联等确认级）→ code_confirm_node 挂起等待人工确认（interrupt）
     - block（拦截级，拦截反馈已回填 messages 且代码已清空）→ react_node 重新生成
+
+    多 Agent 改造（任务 1.4）：本函数由 Reviewer 子图内部复用——
+    code_confirm_node 分支留在子图内，子图外分支经 END 由
+    route_after_reviewer 等价接管
     """
     outcome = state.security_outcome
     if outcome == "allow":
@@ -144,22 +147,34 @@ def route_after_code_review(state: AgentState) -> str:
     return "react_node"
 
 
-def route_after_code_confirm(state: AgentState) -> str:
-    """code_confirm_node 之后路由（按人工确认结果分发）：
-    - 批准 → test_gen_node 进入测试链路（代码指纹已记录，回环不重复弹窗）
-    - 拒绝（拒绝反馈已回填 messages 且代码已清空）→ react_node 换方案
+def route_after_reviewer(state: OrchestrationState) -> str:
+    """reviewer 子图出口路由（多 Agent 改造任务 1.4）：
+
+    子图 END 意味着审查链路已收敛（放行 / 拦截 / 人工确认已裁决），
+    由本函数等价接管旧图 route_after_code_review 的子图外部分与
+    route_after_code_confirm 的全部判定（code_confirm_node 出口在子图内
+    改为无条件 END）：
+    - allow（放行）→ tester 进入验证链路
+    - confirm（批准后残留：code_confirm_node 批准分支只写
+      security_confirmation 不改写 outcome；confirm 必经 code_confirm，
+      子图 END 即已批准）→ tester
+    - block（拦截 / 拒绝 / 异常兜底）→ coder 重新生成
     """
-    if state.security_confirmation:
-        return "test_gen_node"
-    return "react_node"
+    if state.security_outcome in ("allow", "confirm"):
+        return "tester"
+    return "coder"
 
 
-def route_after_test(state: AgentState) -> str:
+def route_after_test(state: OrchestrationState) -> str:
     """test_node 之后路由（Codex 式"验证是安全网，不是收费站"）：
     - 测试通过 → finalize_node 直接交付（跳过反思，省一次 LLM 调用）
     - 测试自身崩溃（test_broken）且未超重生成上限 → test_gen_node 重生成测试
       （代码不动，切断"坏测试 → 反思 → 改正确代码"空转）
     - 否则 → reflect_node（真实失败进入反思循环）
+
+    多 Agent 改造（任务 1.3）：本函数由 Tester 子图内部复用——
+    test_gen_node 回炉分支留在子图内，子图外分支经 END 由
+    route_after_tester 等价接管
     """
     if state.tests_passed:
         return "finalize_node"
@@ -168,7 +183,20 @@ def route_after_test(state: AgentState) -> str:
     return "reflect_node"
 
 
-def route_after_reflect(state: AgentState) -> str:
+def route_after_tester(state: OrchestrationState) -> str:
+    """tester 子图出口路由（多 Agent 改造任务 1.3）：
+
+    子图 END 意味着测试链路已收敛（通过 / 真实失败 / 坏测试回炉已耗尽），
+    由本函数等价接管旧图 route_after_test 的子图外部分：
+    - 测试通过 → finalize_node 直接交付
+    - 否则（真实失败）→ reflect_node 进入反思循环
+    """
+    if state.tests_passed:
+        return "finalize_node"
+    return "reflect_node"
+
+
+def route_after_reflect(state: OrchestrationState) -> str:
     """reflect_node 之后路由：
     - 测试通过 → finalize_node（交付最终代码）
     - 反思轮次已达上限（本轮为第 MAX 轮）→ finalize_node（交付当前实现 + 失败说明）
@@ -183,13 +211,22 @@ def route_after_reflect(state: AgentState) -> str:
     return "refine_node"
 
 
-def route_after_refine(state: AgentState) -> str:
-    """refine_node 之后路由：
-    - 产出新代码 → code_review_node（重写后先过安全审查再重新验证）
-    - 未产出（LLM 超时/失败，代码未变）→ finalize_node 直接收尾：
-      代码不变意味着后续 review 指纹跳过、测试复用重跑必然同结果，
-      再走一轮 reflect 是同输入重复调用（LLM 无状态，同样超时），纯浪费
+def route_after_coder(state: OrchestrationState) -> str:
+    """coder 子图出口路由（多 Agent 改造任务 1.2）：
+
+    子图 END 意味着 react / refine 的出口目标落在子图外，由本函数
+    等价接管旧图 route_after_react / route_after_refine 的子图外部分：
+    - 通用问答（is_answer_only）→ finalize_node 直接交付
+    - refine 未产出新代码（refine_no_progress）→ finalize_node 收尾
+      （判定必须先于 current_code：无产出时 current_code 保留原值非空）
+    - 已产出 current_code → code_review_node（进测试执行前强制安全审查）
+    - 其余（ReAct 超限 / 连续工具失败 / 无代码无工具）→ test_gen_node
+      （进入收尾链路，finalize 兜底）
     """
+    if state.is_answer_only:
+        return "finalize_node"
     if state.refine_no_progress:
         return "finalize_node"
-    return "code_review_node"
+    if state.current_code and state.current_code.strip():
+        return "code_review_node"
+    return "test_gen_node"

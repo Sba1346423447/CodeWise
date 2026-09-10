@@ -1,5 +1,7 @@
 # ===== Agent 编排框架 =====
 langgraph>=1.2.0,<2.0
+# 图检查点 MySQL 持久化（改造三 3.1：断点恢复 / time-travel 底座，aiomysql 驱动）
+langgraph-checkpoint-mysql[aiomysql]>=3.0.0,<4.0
 
 # ===== LLM 调用 =====
 openai>=2.38.0,<3.0

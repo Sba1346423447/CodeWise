@@ -7,14 +7,15 @@ import pytest
 from app.core.graph.edges import (
     MAX_REACT_ITERATIONS,
     MAX_REFLECTION_ROUNDS,
-    route_after_code_confirm,
     route_after_code_review,
     route_after_confirm,
+    route_after_coder,
     route_after_react,
-    route_after_refine,
     route_after_reflect,
-    route_after_review,
+    route_after_reviewer,
     route_after_test,
+    route_after_tester,
+    route_after_review,
 )
 from app.core.graph.state import AgentState
 
@@ -114,16 +115,27 @@ class TestRouteAfterCodeReview:
         assert route_after_code_review(state) == "react_node"
 
 
-class TestRouteAfterCodeConfirm:
-    """代码人工确认节点路由：批准进测试 / 拒绝回 react 换方案"""
+class TestRouteAfterReviewer:
+    """reviewer 子图出口路由（任务 1.4）：审查链路收敛后的子图外分流"""
 
-    def test_用户批准_进入测试链路(self):
-        state = AgentState(security_confirmation=True)
-        assert route_after_code_confirm(state) == "test_gen_node"
+    def test_审查放行_进入测试链路(self):
+        state = AgentState(security_outcome="allow")
+        assert route_after_reviewer(state) == "tester"
 
-    def test_用户拒绝_回react换方案(self):
-        state = AgentState(security_confirmation=False)
-        assert route_after_code_confirm(state) == "react_node"
+    def test_人工批准后残留confirm_进入测试链路(self):
+        # code_confirm_node 批准分支只写 security_confirmation 不改写 outcome，
+        # confirm 必经 code_confirm，子图 END 即已批准
+        state = AgentState(security_outcome="confirm", security_confirmation=True)
+        assert route_after_reviewer(state) == "tester"
+
+    def test_拦截_回coder重新生成(self):
+        state = AgentState(security_outcome="block")
+        assert route_after_reviewer(state) == "coder"
+
+    def test_用户拒绝_回coder换方案(self):
+        # code_confirm_node 拒绝分支写 outcome="block" 并清空 current_code
+        state = AgentState(security_outcome="block", security_confirmation=False)
+        assert route_after_reviewer(state) == "coder"
 
 
 class TestRouteAfterTest:
@@ -144,6 +156,20 @@ class TestRouteAfterTest:
     def test_真实失败_进入反思(self):
         state = AgentState(tests_passed=False)
         assert route_after_test(state) == "reflect_node"
+
+
+class TestRouteAfterTester:
+    """tester 子图出口路由（任务 1.3）：坏测试回炉已在子图内消化，只剩两分支"""
+
+    def test_测试通过_跳过反思直接交付(self):
+        state = AgentState(tests_passed=True)
+        assert route_after_tester(state) == "finalize_node"
+
+    def test_真实失败_进入反思(self):
+        # 坏测试回炉耗尽（test_broken 且 regen 已达上限）后子图 END，
+        # 对主图而言与真实失败同观感：进反思
+        state = AgentState(tests_passed=False, test_broken=True, test_regen_count=1)
+        assert route_after_tester(state) == "reflect_node"
 
 
 class TestRouteAfterReflect:
@@ -167,15 +193,23 @@ class TestRouteAfterReflect:
         assert route_after_reflect(state) == "refine_node"
 
 
-class TestRouteAfterRefine:
+class TestRouteAfterCoder:
+    def test_通用问答_直接交付(self):
+        state = AgentState(is_answer_only=True)
+        assert route_after_coder(state) == "finalize_node"
+
     def test_未产出新代码_直接收尾(self):
         # refine 超时/失败保留原代码：同输入重复走审查测试反思是纯浪费
         state = AgentState(refine_no_progress=True)
-        assert route_after_refine(state) == "finalize_node"
+        assert route_after_coder(state) == "finalize_node"
 
     def test_产出新代码_进安全审查闭环(self):
-        state = AgentState(refine_no_progress=False)
-        assert route_after_refine(state) == "code_review_node"
+        state = AgentState(refine_no_progress=False, current_code="def f(): return 1\n")
+        assert route_after_coder(state) == "code_review_node"
+
+    def test_无代码无问答_进测试链路收尾(self):
+        state = AgentState()
+        assert route_after_coder(state) == "test_gen_node"
 
 
 if __name__ == "__main__":

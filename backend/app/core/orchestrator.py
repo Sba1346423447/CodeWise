@@ -18,7 +18,7 @@ from langgraph.types import Command
 from ..llm.config import config as llm_config
 from ..memory.conversation import compress_messages
 from ..utils.logger import get_logger
-from .graph.builder import agent_graph
+from .graph import builder
 from .graph.state import AgentState
 from .tools.code_executor import CodeExecutor
 from .tools.file_editor import FileEditor
@@ -194,18 +194,30 @@ class AgentOrchestrator:
           其中 __interrupt__ 条目表示 confirm_node 挂起，提炼为确认请求事件
         - values 流：捕获最终完整状态
         返回 (final_state, thinking, pending_confirmation)。
+
+        多 Agent 改造（任务 1.2）：astream 启用 subgraphs=True 以透出 Coder
+        子图内部节点事件（react_node 等细分事件名保持不变，SSE 兼容）。
+        事件为三元组 (namespace, mode, data)：namespace 为空元组表示主图
+        层级，非空（如 ('coder:<task_id>',)）表示子图内部层级；
+        __interrupt__ 会在子图与顶层各出现一次，仅处理顶层（去重）。
         """
         thinking: list[dict[str, Any]] = []
         final_state: AgentState | None = None
         pending_confirmation: dict[str, Any] | None = None
         config = {"configurable": {"thread_id": thread_id}}
 
-        async for mode, data in agent_graph.astream(
-            graph_input, config, stream_mode=["updates", "values"]
+        # builder.agent_graph 属性访问：main.py lifespan 重建 MySQL 持久化
+        # 单例后（改造三 3.1），此处即时取到新图（import 名字绑定会拿到旧图）
+        async for namespace, mode, data in builder.agent_graph.astream(
+            graph_input, config, stream_mode=["updates", "values"], subgraphs=True
         ):
+            is_root = not namespace
             if mode == "updates":
                 for node_name, update in data.items():
                     if node_name == "__interrupt__":
+                        # 子图层的 interrupt 事件与顶层重复，仅处理顶层
+                        if not is_root:
+                            continue
                         # confirm_node 挂起：提炼待确认信息，推送确认请求事件
                         interrupts = update if isinstance(update, tuple) else (update,)
                         for intr in interrupts:
@@ -219,6 +231,10 @@ class AgentOrchestrator:
                                     {"type": "confirmation_required", **pending_confirmation}
                                 )
                         continue
+                    # supervisor 为纯内部路由节点（多 Agent 任务 1.5）：
+                    # 无用户可理解产出，事件不推送、摘要不提炼
+                    if node_name == "supervisor":
+                        continue
                     if on_event:
                         await on_event(
                             {"type": "node", "node": node_name, "update": update}
@@ -226,7 +242,8 @@ class AgentOrchestrator:
                     item = self._summarize_node(node_name, update)
                     if item:
                         thinking.append(item)
-            else:
+            elif is_root:
+                # 仅主图层级的 values 流更新最终状态（子图层级跳过）
                 final_state = data
 
         return final_state, thinking, pending_confirmation

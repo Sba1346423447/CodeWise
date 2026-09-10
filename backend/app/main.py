@@ -24,6 +24,7 @@ load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 from . import __version__  # noqa: E402  # .env 必须先于 app 模块导入加载
 from .api import agent, deps, export, sessions  # noqa: E402
+from .core.graph import builder, checkpoint  # noqa: E402
 from .models.database import init_db  # noqa: E402
 from .utils.logger import get_audit_logger, setup_logging  # noqa: E402
 
@@ -96,10 +97,24 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """应用生命周期：启动时初始化日志与数据库迁移（Alembic upgrade head，幂等）。"""
+    """应用生命周期：初始化日志、数据库迁移与 Agent 图检查点持久化。
+
+    checkpointer（改造三 3.1）：settings.yaml agent.checkpointer=mysql 时，
+    创建 AIOMySQLSaver 并重建 agent_graph 单例——图检查点落 MySQL，
+    进程重启后同 thread_id 从断点恢复（InMemorySaver 则重启丢状态）。
+    """
     setup_logging()
     init_db()
-    yield
+    mysql_saver = None
+    if checkpoint.CHECKPOINTER_MODE == "mysql":
+        # 持久化检查点：连接失败直接抛错终止启动（生产语义：不静默降级）
+        mysql_saver = await checkpoint.create_mysql_saver()
+        builder.agent_graph = builder.build_agent_graph(mysql_saver)
+    try:
+        yield
+    finally:
+        if mysql_saver is not None:
+            await checkpoint.close_mysql_saver(mysql_saver)
 
 
 app = FastAPI(

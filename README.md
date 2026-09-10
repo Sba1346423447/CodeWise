@@ -1,11 +1,13 @@
 # CodeWise 智码
 
-基于 **LangGraph + FastAPI + React** 构建的自纠正式 AI 编程助手，采用 **Agent 自主工作流**，LLM 借助 ReAct 循环自主决策代码生成、验证执行、批判反思与迭代优化，全程 SSE 流式输出，提供对话式 Web 前端与 Docker 一键部署。
+基于 **LangGraph + FastAPI + React** 构建的自纠正式 AI 编程助手，采用 **多 Agent 协作架构**：Supervisor 编排 Coder / Reviewer / Tester 三个子图，LLM 借助 ReAct 循环自主决策代码生成、验证执行、批判反思与迭代优化；状态检查点落 MySQL 持久化，支持中断恢复与历史回放；全程 SSE 流式输出，提供对话式 Web 前端与 Docker 一键部署。
 
 ---
 
 ## 核心特性
 
+- **多 Agent 协作架构**：Supervisor 确定性规则编排 Coder / Reviewer / Tester 三个功能子图，职责分离清晰，每个子图封闭自有循环，支持断点恢复
+- **MySQL 检查点持久化**：中断挂起、kill 重启后从断点续跑，支持 time-travel 历史遍历与 fork 重跑（基于 LangGraph 原生 API）
 - **Agent 自主工作流**：LangGraph 状态机编排「生成 → 审查 → 验证 → 反思 → 优化 → 交付」完整闭环，LLM 自主决策每一步，无需人工介入
 - **ReAct 循环**：Thought → Action → Observation 循环，LLM 判断产出代码还是调用工具，观察结果驱动下一步决策
 - **四层安全审查链路**：规则过滤（危险代码/敏感路径）→ 工具自检（路径穿越防护）→ AI 风险分类（prompt 注入防御，失败保守降级需确认）→ 人工确认（LangGraph interrupt + SSE 弹窗 + Command 恢复），保证 Agent 在真实开发环境下可控
@@ -15,7 +17,7 @@
 - **代码库感知（repo-map）**：扫描项目结构生成类/函数摘要注入 LLM，让 Agent 基于已有代码库工作（对标 Aider 核心设计）
 - **三层记忆架构**：会话内对话记忆（多轮演进）、单任务反思记录、跨会话长期经验库（ChromaDB 向量检索复用）
 - **SSE 流式输出**：正文逐字 + 代码逐行打字机效果，思考过程实时可视化
-- **停止生成**：执行中可随时手动中止，真正终止图执行与 LLM 调用（asyncio Task 取消），避免空耗 token；会话记录 stopped 状态可回放
+- **停止生成**：执行中可随时手动中止，真正终止图执行与 LLM 调用（asyncio Task 取消）；会话记录 stopped 状态可回放
 - **Web 前端**：React + TypeScript 单页应用，支持会话管理、Markdown 渲染、思考过程折叠展示、深色主题、安全审查人工确认弹窗
 - **Docker 部署**：五服务（backend + frontend + mysql + chromadb + nginx）一键容器化启动
 
@@ -49,7 +51,8 @@ databox/
 │   │   ├── core/
 │   │   │   ├── orchestrator.py # 编排器：协调 Graph / Tools / Memory / LLM
 │   │   │   ├── repo_map.py     # 代码库感知：AST 扫描生成项目结构摘要
-│   │   │   ├── graph/          # 图编排：state / nodes / edges / builder
+│   │   │   ├── graph/          # 图编排：builder / supervisor / checkpoint / edges
+│   │   │   │   └── subgraphs/  # Coder / Reviewer / Tester 三个功能子图（多 Agent）
 │   │   │   ├── prompts/        # ReAct / Reflection / Refine / 风险分类 提示词
 │   │   │   ├── security/       # L1 规则过滤 + L3 AI 风险分类
 │   │   │   └── tools/          # 代码执行 / 验证 / 静态检查 / 联网检索 / 文件编辑
@@ -196,41 +199,38 @@ docker compose down            # 停止并移除容器（保留卷数据）
 
 ## 工作流概览
 
+多 Agent 协作：主图由 **Supervisor** 集中路由，Coder / Reviewer / Tester 三个子图各封闭自有循环；总通过 Supervisor 返回（Command 动态路由），决策为确定性规则（非 LLM 软路由）。
+
 ```
 用户需求
    │
    ▼
-┌─ react_node ──有工具调用──► review_node（L1规则+L3AI风险）
-│        │                      │confirm
-│        │                      ▼
-│        │                  confirm_node（interrupt弹窗等用户批准）
-│        │                      │ 批准→tool_node / 拒绝→react_node
-│        │
-│        │ 有工具审查通过
-│        └──────────► tool_node ──►（ReAct 循环）
-│
-│  产出代码
-│        ▼
-│   code_review_node（拦截级丢弃代码/确认级挂起/放行记指纹）
-│        │confirm
-│        ▼
-│   code_confirm_node（interrupt弹窗等用户批准）
-│        │ 批准→进入测试链路 / 拒绝→react_node换方案
-│        ▼
-│   test_gen_node（生成验证用例，复用/按需重生成）
-│        ▼
-│   test_node（真实运行，客观判定是否通过）
-│        ├─测试自身问题（collection error/外部依赖未mock）→ test_gen_node 重生成测试
-│        ├─测试通过 ──────────────────────────────────────► finalize_node
-│        ▼
-│   reflect_node（四维批判：正确性 / 性能 / 可读性 / 类型安全）
-│        ▼
-│   refine_node（按意见重写，改坏则回退最优快照）
-│        ├─产出新代码 → code_review_node（重写后重新审查）
-│        └─未产出（LLM超时/失败）→ finalize_node 直接收尾
-│        ▼
-└─ finalize_node（交付：总结 + 最终代码 + 结论）
+Supervisor ──首次──► Coder 子图（ReAct 循环：react ⇄ review → confirm → tool）
+   ▲                        │
+   │                        │ 产出代码完成
+   │                        ▼
+   │                    Reviewer 子图（code_review 三层审查）
+   │                        │ confirm → code_confirm（interrupt 弹窗等用户批准/拒绝）
+   │                        │ block → 回 Coder 换方案
+   │                        ▼
+   │                    Tester 子图（test_gen 生成用例 → test 真实运行）
+   │                        │ 测试自身问题（collection error/外部依赖未mock）→ 子图内回炉重生成
+   │                        │ 失败
+   │                        ▼
+   │                   Reflect（四维批判：正确性/性能/可读性/类型安全）
+   │                        │ 未超限且须修正
+   │                        ▼
+   │                   Coder 子图（凭 critique 进 refine_node 按意见重写）
+   │                        │
+   └────────────── 通过或反思超限/无产出  ───► Finalize 交付（总结 + 代码）
 ```
+
+关键机制：
+- **确认挂起/恢复**：Reviewer 的 code_confirm 命中确认级模式（网络外联/动态执行）时
+  interrupt 挂起，状态落 MySQL（checkpointer），批准/拒绝后 `Command(resume)` 从
+  子图内部断点续跑（kill 重启也能恢复）
+- **收敛护栏**：反思轮次上限、最优快照回退、refine 无新代码直接收尾——保证多轮
+  协作不失控
 
 ---
 
@@ -240,7 +240,7 @@ docker compose down            # 停止并移除容器（保留卷数据）
 - **多层安全审查链路**：构建规则过滤（L1）、工具自检（L2，路径穿越+敏感文件防护）、AI 风险分类（L3，prompt 注入防御+保守降级）与人工确认（L4，LangGraph interrupt）的四层审查架构，危险代码模式拆 block/confirm 两级——命令执行类（os.system/subprocess 等）硬拦截，网络外联与动态执行类（eval/`__import__`，ReAct 框架动态分发核心）触发人工弹窗裁决而非静默拦截，代码主链路（test_node 真实执行前）也强制过审查
 - **代码库感知**：repo-map 扫描项目结构注入 LLM，Agent 能基于已有代码库工作，而非生成孤立代码（对标 Aider）
 - **文件编辑能力**：内置 file_editor 工具，Agent 可真实读写项目文件，修改落地后仍走自纠闭环验证
-- **图编排架构**：LangGraph StateGraph 显式建模节点与条件路由，状态流转清晰可追踪，并发安全
+- **多 Agent 图编排架构**：Supervisor + 子图的层级图模型（LangGraph 原生子图能力），编排决策单点集中（Command 动态路由，确定性规则而非 LLM 软路由），子图自治边界清晰、各自闭环可独立演化
 - **三层记忆体系**：会话内对话记忆、单任务反思记录、跨会话向量经验库，越用越聪明
 - **配置与代码解耦**：提示词模板 / 模型参数 / 安全规则统一 YAML 管理，非代码人员可调优
 - **测试信号质量分流**：区分「测试自身问题」与「代码问题」——collection error 或外部依赖未 mock（连接/认证/限流类错误特征）路由回测试重生成而非驱动反思修码，切断「坏信号 → 反思 → 改正确代码」的空转循环；反思输入超长代码截断、精修未产出新代码直接收尾、测试通过跳过反思，实测复杂任务耗时 239s → ~43s

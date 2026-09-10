@@ -20,6 +20,11 @@ agent:
   # 最大反思轮次：Reflect → Refine 循环的上限，超出后强制输出当前结果。
   # 2 轮给"审查→修正"留出一次纠错机会，提高成功率（稳定性优先）
   max_reflection_rounds: 2
+  # 图检查点持久化后端（改造三 3.1）：
+  # - memory：进程内检查点（默认，测试/无 DB 环境零依赖；进程重启丢状态）
+  # - mysql：检查点落 MySQL（复用 .env 的 DATABASE_URL），进程重启后
+  #   同 thread_id 从断点恢复，支持 time-travel 历史回放；需 MySQL 服务在线
+  checkpointer: "memory"
 
 # ===== 沙箱执行配置 =====
 sandbox:
